@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pth
+*.pt
+*.ckpt
+*.log
+exp_clean/
+runs/
+tmp/
+.vscode/
+.idea/
