@@ -129,18 +129,14 @@ def main():
     logger.propagate = 0
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = DepthAnythingV2(
-        **MODEL_CONFIGS[args.encoder],
-        use_bn=False,
-        use_clstoken=False,
-        max_depth=args.max_depth,
-    )
+    model = DepthAnythingV2(**MODEL_CONFIGS[args.encoder])
     state = torch.load(args.load_from, map_location="cpu")
     if isinstance(state, dict) and "model" in state:
         state = state["model"]
-    model.load_state_dict(state, strict=False)
+    load_msg = model.load_state_dict(state, strict=True)
     model = model.to(device).eval()
     logger.info("Loaded checkpoint: %s" % args.load_from)
+    logger.info("Checkpoint load message: %s" % str(load_msg))
 
     file_pairs = load_file_list(args.img_path)
     logger.info("Validation file list loaded: %d samples" % len(file_pairs))
