@@ -481,7 +481,7 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.save_path, exist_ok=True)
-    logger = init_log("clean_baseline", logging.INFO)
+    logger = init_log("clean_baseline", logging.INFO, os.path.join(args.save_path, "train.log"))
     logger.propagate = 0
     logger.info(pprint.pformat(vars(args)))
     set_seed(args.seed)
@@ -651,4 +651,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

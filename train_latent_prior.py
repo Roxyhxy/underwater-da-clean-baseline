@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import pprint
+import random
 
 import torch
 from torch.cuda.amp import GradScaler, autocast
@@ -37,35 +38,50 @@ def save_checkpoint(model, path, args, epoch=None, metrics=None):
     )
 
 
-def build_optimizer(model, args):
-    groups = []
-    latent_prior_params = []
-    prior_head_params = []
-    base_head_params = []
-    backbone_params = []
+def _count_params(params):
+    return sum(param.numel() for param in params)
 
+
+def summarize_trainable_parameters(model):
+    summary = {
+        "latent_prior": [],
+        "prior_head": [],
+        "base_head": [],
+        "backbone": [],
+    }
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
         if name.startswith("latent_prior_encoder."):
-            latent_prior_params.append(param)
+            summary["latent_prior"].append((name, param))
         elif name.startswith("depth_head.global_mod.") or name.startswith("depth_head.deg_map_generator.") or name.startswith(
             "depth_head.prior_to_feat."
         ):
-            prior_head_params.append(param)
+            summary["prior_head"].append((name, param))
         elif name.startswith("depth_head."):
-            base_head_params.append(param)
+            summary["base_head"].append((name, param))
         elif name.startswith("pretrained."):
-            backbone_params.append(param)
+            summary["backbone"].append((name, param))
+    return summary
+
+
+def build_optimizer(model, args):
+    groups = []
+    summary = summarize_trainable_parameters(model)
+
+    latent_prior_params = [param for _, param in summary["latent_prior"]]
+    prior_head_params = [param for _, param in summary["prior_head"]]
+    base_head_params = [param for _, param in summary["base_head"]]
+    backbone_params = [param for _, param in summary["backbone"]]
 
     if latent_prior_params:
-        groups.append({"params": latent_prior_params, "lr": args.prior_lr or args.lr})
+        groups.append({"params": latent_prior_params, "lr": args.prior_lr or args.lr, "name": "latent_prior"})
     if prior_head_params:
-        groups.append({"params": prior_head_params, "lr": args.prior_head_lr or args.lr})
+        groups.append({"params": prior_head_params, "lr": args.prior_head_lr or args.lr, "name": "prior_head"})
     if base_head_params:
-        groups.append({"params": base_head_params, "lr": args.head_lr or args.lr})
+        groups.append({"params": base_head_params, "lr": args.head_lr or args.lr, "name": "base_head"})
     if backbone_params:
-        groups.append({"params": backbone_params, "lr": args.backbone_lr or args.lr})
+        groups.append({"params": backbone_params, "lr": args.backbone_lr or args.lr, "name": "backbone"})
     return AdamW(groups, lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
 
 
@@ -102,10 +118,10 @@ def main():
     parser.add_argument("--silog-weight", default=0.5, type=float)
     parser.add_argument("--metric-weight", default=1.0, type=float)
     parser.add_argument("--grad-weight", default=0.05, type=float)
-    parser.add_argument("--consistency-hardness-weight", default=0.08, type=float)
+    parser.add_argument("--consistency-hardness-weight", default=0.0, type=float)
     parser.add_argument("--consistency-hardness-clamp-min", default=0.90, type=float)
     parser.add_argument("--consistency-hardness-clamp-max", default=1.10, type=float)
-    parser.add_argument("--consistency-aug-prob", default=1.0, type=float)
+    parser.add_argument("--consistency-aug-prob", default=0.0, type=float)
     parser.add_argument("--consistency-blur-prob", default=0.30, type=float)
     parser.add_argument("--consistency-noise-prob", default=0.20, type=float)
     parser.add_argument("--consistency-noise-std", default=0.01, type=float)
@@ -113,10 +129,11 @@ def main():
     parser.add_argument("--min-lr-ratio", default=0.2, type=float)
     parser.add_argument("--weight-decay", default=0.0, type=float)
     parser.add_argument("--num-workers", default=4, type=int)
+    parser.add_argument("--log-interval", default=20, type=int)
     args = parser.parse_args()
 
     os.makedirs(args.save_path, exist_ok=True)
-    logger = init_log("latent_prior", logging.INFO)
+    logger = init_log("latent_prior", logging.INFO, os.path.join(args.save_path, "train.log"))
     logger.propagate = 0
     logger.info(pprint.pformat(vars(args)))
     set_seed(args.seed)
@@ -142,6 +159,10 @@ def main():
         shuffle=False,
         num_workers=max(1, args.num_workers // 2),
         pin_memory=True,
+    )
+    logger.info(
+        "Dataset loaded: train=%d samples, val=%d samples, train_iters_per_epoch=%d"
+        % (len(train_set), len(val_set), len(train_loader))
     )
 
     base_ckpt = torch.load(args.pretrained_from, map_location="cpu")
@@ -171,16 +192,42 @@ def main():
         model.load_state_dict(init_state, strict=False)
         logger.info(f"Loaded latent-prior checkpoint from {args.init_from}")
 
+    param_summary = summarize_trainable_parameters(model)
+    logger.info(
+        "Trainable params | latent_prior=%d | prior_head=%d | base_head=%d | backbone=%d"
+        % (
+            _count_params([param for _, param in param_summary["latent_prior"]]),
+            _count_params([param for _, param in param_summary["prior_head"]]),
+            _count_params([param for _, param in param_summary["base_head"]]),
+            _count_params([param for _, param in param_summary["backbone"]]),
+        )
+    )
+
     optimizer = build_optimizer(model, args)
     total_steps = args.epochs * len(train_loader)
     scheduler = make_scheduler(optimizer, total_steps, args.warmup_steps, args.min_lr_ratio)
     scaler = GradScaler(enabled=device.type == "cuda")
+    for group in optimizer.param_groups:
+        logger.info(
+            "Optimizer group %-12s lr=%.2e params=%d"
+            % (group.get("name", "default"), group["lr"], _count_params(group["params"]))
+        )
+    logger.info(
+        "Consistency branch: enabled=%s weight=%.4f aug_prob=%.4f"
+        % (
+            str(args.consistency_hardness_weight > 0 and args.consistency_aug_prob > 0),
+            args.consistency_hardness_weight,
+            args.consistency_aug_prob,
+        )
+    )
 
     best_abs_rel = float("inf")
     best_d1 = 0.0
+    global_step = 0
 
     for epoch in range(args.epochs):
         model.train()
+        running_loss = 0.0
         for step, sample in enumerate(train_loader):
             image = sample["image"].to(device, non_blocking=True)
             depth = sample["depth"].to(device, non_blocking=True)
@@ -192,7 +239,7 @@ def main():
                 pred_disp = model(image)
                 sup_weight = valid_mask.float()
 
-                if args.consistency_hardness_weight > 0:
+                if args.consistency_hardness_weight > 0 and random.random() < args.consistency_aug_prob:
                     aug_image = random_underwater_consistency_augment(
                         image,
                         blur_prob=args.consistency_blur_prob,
@@ -237,14 +284,17 @@ def main():
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
+            running_loss += loss.item()
+            global_step += 1
 
-            if step % 20 == 0:
+            if step % args.log_interval == 0:
                 logger.info(
-                    "Epoch %02d Iter %04d/%04d Loss=%.6f L1=%.6f SiLog=%.6f Metric=%.6f Grad=%.6f HardMean=%.6f LR=%.2e"
+                    "Epoch %02d Iter %04d/%04d Step %06d Loss=%.6f L1=%.6f SiLog=%.6f Metric=%.6f Grad=%.6f HardMean=%.6f LR=%.2e"
                     % (
                         epoch + 1,
                         step,
                         len(train_loader),
+                        global_step,
                         loss.item(),
                         loss_l1.item(),
                         loss_silog.item(),
@@ -255,6 +305,8 @@ def main():
                     )
                 )
 
+        mean_train_loss = running_loss / max(len(train_loader), 1)
+        logger.info("Epoch %02d finished | mean_train_loss=%.6f" % (epoch + 1, mean_train_loss))
         metrics = evaluate(model, val_loader, device, args.min_depth, args.max_depth)
         save_checkpoint(model, os.path.join(args.save_path, "latest.pth"), args, epoch=epoch, metrics=metrics)
         if metrics is None:
@@ -265,9 +317,11 @@ def main():
         if metrics["d1"] > best_d1:
             best_d1 = metrics["d1"]
             save_checkpoint(model, os.path.join(args.save_path, "best_d1.pth"), args, epoch=epoch, metrics=metrics)
+            logger.info("Saved new best_d1 checkpoint: best_d1=%.4f" % best_d1)
         if metrics["abs_rel"] < best_abs_rel:
             best_abs_rel = metrics["abs_rel"]
             save_checkpoint(model, os.path.join(args.save_path, "best_abs_rel.pth"), args, epoch=epoch, metrics=metrics)
+            logger.info("Saved new best_abs_rel checkpoint: best_abs_rel=%.4f" % best_abs_rel)
 
 
 if __name__ == "__main__":
