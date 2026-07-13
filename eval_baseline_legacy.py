@@ -92,9 +92,11 @@ def evaluate_legacy(model, file_pairs, input_size, device, max_depth, logger):
         if gt_depth is None:
             logger.info("Skip unreadable depth: %s" % depth_path)
             continue
+        if gt_depth.dtype == np.uint16:
+            gt_depth = gt_depth.astype(np.float32) / 1000.0
         gt_depth_t = torch.tensor(gt_depth, device=device, dtype=torch.float32)
 
-        valid_mask = gt_depth_t > 0
+        valid_mask = (gt_depth_t > 0) & (gt_depth_t < max_depth)
         if valid_mask.sum() < 10:
             logger.info("Skip sample with too few valid pixels: %s" % image_path)
             continue
@@ -132,8 +134,9 @@ def main():
     model = DepthAnythingV2(**MODEL_CONFIGS[args.encoder])
     state = torch.load(args.load_from, map_location="cpu")
     if isinstance(state, dict) and "model" in state:
-        state = state["model"]
-    load_msg = model.load_state_dict(state, strict=True)
+        load_msg = model.load_state_dict(state["model"], strict=True)
+    else:
+        load_msg = model.load_state_dict(torch.load(args.load_from, map_location="cpu"), strict=True)
     model = model.to(device).eval()
     logger.info("Loaded checkpoint: %s" % args.load_from)
     logger.info("Checkpoint load message: %s" % str(load_msg))
