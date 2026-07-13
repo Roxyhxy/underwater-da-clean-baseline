@@ -5,11 +5,11 @@ import pprint
 import random
 
 import torch
-from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
 from dataset.flsea import FLSea
+from eval_latent_prior import evaluate_latent_prior, load_file_list
 from models.depth_anything_latent_prior import DepthAnythingLatentPrior
 from train import (
     MODEL_CONFIGS,
@@ -17,7 +17,6 @@ from train import (
     aligned_depth_metric_loss,
     depth_anything_consistency_hardness_weight,
     depthdive_l1_silog_loss,
-    evaluate,
     make_scheduler,
     normalized_disparity_shape_loss,
     random_underwater_consistency_augment,
@@ -130,6 +129,8 @@ def main():
     parser.add_argument("--weight-decay", default=0.0, type=float)
     parser.add_argument("--num-workers", default=4, type=int)
     parser.add_argument("--log-interval", default=20, type=int)
+    parser.add_argument("--amp", action="store_true", help="Enable CUDA automatic mixed precision")
+    parser.add_argument("--grad-clip", default=1.0, type=float, help="Max gradient norm; <= 0 disables clipping")
     args = parser.parse_args()
 
     os.makedirs(args.save_path, exist_ok=True)
@@ -144,7 +145,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_set = FLSea(args.train_list, "train", size=(args.img_size, args.img_size))
-    val_set = FLSea(args.val_list, "val", size=(args.img_size, args.img_size))
+    val_pairs = load_file_list(args.val_list)
     train_loader = DataLoader(
         train_set,
         batch_size=args.bs,
@@ -153,16 +154,9 @@ def main():
         pin_memory=True,
         drop_last=True,
     )
-    val_loader = DataLoader(
-        val_set,
-        batch_size=1,
-        shuffle=False,
-        num_workers=max(1, args.num_workers // 2),
-        pin_memory=True,
-    )
     logger.info(
         "Dataset loaded: train=%d samples, val=%d samples, train_iters_per_epoch=%d"
-        % (len(train_set), len(val_set), len(train_loader))
+        % (len(train_set), len(val_pairs), len(train_loader))
     )
 
     base_ckpt = torch.load(args.pretrained_from, map_location="cpu")
@@ -206,7 +200,8 @@ def main():
     optimizer = build_optimizer(model, args)
     total_steps = args.epochs * len(train_loader)
     scheduler = make_scheduler(optimizer, total_steps, args.warmup_steps, args.min_lr_ratio)
-    scaler = GradScaler(enabled=device.type == "cuda")
+    amp_enabled = args.amp and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     for group in optimizer.param_groups:
         logger.info(
             "Optimizer group %-12s lr=%.2e params=%d"
@@ -220,6 +215,7 @@ def main():
             args.consistency_aug_prob,
         )
     )
+    logger.info("Numerics: amp=%s grad_clip=%.4f" % (str(amp_enabled), args.grad_clip))
 
     best_abs_rel = float("inf")
     best_d1 = 0.0
@@ -235,7 +231,7 @@ def main():
             valid_mask = valid_mask & (depth >= args.min_depth) & (depth <= args.max_depth)
 
             optimizer.zero_grad(set_to_none=True)
-            with autocast(enabled=device.type == "cuda"):
+            with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
                 pred_disp = model(image)
                 sup_weight = valid_mask.float()
 
@@ -280,7 +276,16 @@ def main():
                     + args.grad_weight * loss_grad
                 )
 
+            if not torch.isfinite(loss):
+                logger.warning(
+                    "Skip non-finite loss at epoch=%d iter=%d: %s" % (epoch + 1, step, str(loss.item()))
+                )
+                continue
+
             scaler.scale(loss).backward()
+            if args.grad_clip > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
@@ -307,7 +312,15 @@ def main():
 
         mean_train_loss = running_loss / max(len(train_loader), 1)
         logger.info("Epoch %02d finished | mean_train_loss=%.6f" % (epoch + 1, mean_train_loss))
-        metrics = evaluate(model, val_loader, device, args.min_depth, args.max_depth)
+        model.eval()
+        metrics = evaluate_latent_prior(
+            model,
+            val_pairs,
+            args.img_size,
+            device,
+            args.max_depth,
+            logger,
+        )
         save_checkpoint(model, os.path.join(args.save_path, "latest.pth"), args, epoch=epoch, metrics=metrics)
         if metrics is None:
             logger.info("Validation skipped: no valid samples")

@@ -23,7 +23,7 @@ It intentionally removes the exploratory branches that made the old project hard
 ## Folder layout
 
 - `train.py`: clean FLSea training entry
-- `eval.py`: validation on FLSea splits
+- `eval_baseline_legacy.py`: verified DA_0-compatible baseline evaluation
 - `train_latent_prior.py`: latent-prior training entry
 - `eval_latent_prior.py`: latent-prior validation entry
 - `models/depth_anything_lora.py`: minimal LoRA + AquaDegrade model
@@ -102,15 +102,18 @@ bash scripts/train_flsea_latent_prior.sh
 Default behavior of the latent-prior script:
 
 - freezes the DINOv2 backbone first
-- keeps the standard depth head trainable
+- freezes the verified standard DPT depth head for the first ablation
 - trains `UnderwaterLatentPriorEncoder` plus the new deg-map/global-modulation path
+- uses FP32 and gradient clipping by default for numerical stability
+- evaluates every epoch with the same original-resolution disparity-alignment protocol as the verified baseline
 - saves full checkpoints because this branch is no longer LoRA-only
 
 Recommended first-round research-one rule:
 
 - keep `CONSISTENCY_HARDNESS_WEIGHT=0.0`
 - keep `CONSISTENCY_AUG_PROB=0.0`
-- freeze the backbone first
+- freeze both the backbone and original DPT decoder
+- do not add encoder/decoder LoRA until the latent-prior-only ablation is complete
 - compare only against `scripts/eval_flsea_baseline_legacy.sh`
 - use `scripts/eval_flsea_latent_prior.sh` for the final latent-prior number under the same FLSea protocol
 

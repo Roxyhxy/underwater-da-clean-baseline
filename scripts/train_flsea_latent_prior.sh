@@ -17,7 +17,7 @@ PYTHON_BIN="python"
 CKPT="/data1/hxy/Depth-Anything-V2/checkpoints/depth_anything_v2_vits.pth"
 TRAIN_LIST="/data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/train_half.txt"
 VAL_LIST="/data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/val.txt"
-SAVE_PATH="runs/research1_latent_prior_stage1"
+SAVE_PATH="runs/research1_latent_prior_frozen_head_fp32"
 
 ENCODER="vits"
 IMG_SIZE=518
@@ -40,14 +40,16 @@ DEG_MAP_SCALE=0.2
 LOSS_MODE="depthdive_relative"
 CONSISTENCY_HARDNESS_WEIGHT=0.0
 CONSISTENCY_AUG_PROB=0.0
+AMP="false"
+GRAD_CLIP=1.0
 
 # First-step strategy:
 # 1) freeze DINOv2 backbone
 # 2) train latent prior encoder
 # 3) train new degradation-map / global-modulation path
-# 4) lightly tune the standard depth head
+# 4) keep the verified standard depth head unchanged for the first ablation
 FREEZE_BACKBONE="true"
-FREEZE_BASE_HEAD="false"
+FREEZE_BASE_HEAD="true"
 FREEZE_LATENT_PRIOR="false"
 
 EXTRA_ARGS=("$@")
@@ -94,8 +96,13 @@ CMD=(
   --loss-mode "${LOSS_MODE}"
   --consistency-hardness-weight "${CONSISTENCY_HARDNESS_WEIGHT}"
   --consistency-aug-prob "${CONSISTENCY_AUG_PROB}"
+  --grad-clip "${GRAD_CLIP}"
   --num-workers "${NUM_WORKERS}"
 )
+
+if [[ "${AMP}" == "true" ]]; then
+  CMD+=(--amp)
+fi
 
 if [[ "${FREEZE_BACKBONE}" == "true" ]]; then
   CMD+=(--freeze-backbone)
