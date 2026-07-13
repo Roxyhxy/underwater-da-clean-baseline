@@ -7,19 +7,18 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT_DIR}"
 
 # =========================
-# Edit this block directly
+# Recommended latent-prior evaluation:
+# use the same FLSea legacy protocol as the verified baseline.
 # =========================
 PYTHON_BIN="python"
-CKPT="/data1/hxy/DPV2/checkpoints/depth_anything_v2_vits.pth"
+CKPT="/data1/hxy/Depth-Anything-V2/checkpoints/depth_anything_v2_vits.pth"
 LOAD_FROM="/path/to/best_abs_rel.pth"
-VAL_LIST="/data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/val.txt"
+VAL_LIST="/data1/hxy/Depth-Anything-V2/DA_0/dataset/splits/flsea/test.txt"
 SAVE_DIR="eval/flsea_latent_prior_eval"
 
 ENCODER="vits"
 IMG_SIZE=518
-MIN_DEPTH=0.1
 MAX_DEPTH=40.0
-NUM_WORKERS=2
 PRIOR_BASE_CH=32
 PRIOR_CHANNELS="32,64,128,256"
 LATENT_DIM=128
@@ -27,7 +26,7 @@ PRIOR_FFT_SIZE=64
 PRIOR_STAT_HIDDEN=64
 DEG_MAP_SCALE=0.2
 
-SAVE_DEPTH="true"
+SAVE_DEPTH="false"
 DEPTH_OUTPUT_DIR="eval/flsea_latent_prior_eval/depth"
 
 EXTRA_ARGS=("$@")
@@ -55,7 +54,6 @@ CMD=(
   --pretrained-from "${CKPT}"
   --val-list "${VAL_LIST}"
   --img-size "${IMG_SIZE}"
-  --min-depth "${MIN_DEPTH}"
   --max-depth "${MAX_DEPTH}"
   --prior-base-ch "${PRIOR_BASE_CH}"
   --prior-channels "${PRIOR_CHANNELS}"
@@ -63,7 +61,6 @@ CMD=(
   --prior-fft-size "${PRIOR_FFT_SIZE}"
   --prior-stat-hidden "${PRIOR_STAT_HIDDEN}"
   --deg-map-scale "${DEG_MAP_SCALE}"
-  --num-workers "${NUM_WORKERS}"
   --save-dir "${SAVE_DIR}"
 )
 

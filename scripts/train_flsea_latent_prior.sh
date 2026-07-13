@@ -9,14 +9,15 @@ cd "${ROOT_DIR}"
 
 
 # =========================
-# Edit this block directly
+# First-round research-one run:
+# keep it clean, compare only latent prior against the verified baseline.
 # =========================
 export CUDA_VISIBLE_DEVICES=1
 PYTHON_BIN="python"
-CKPT="/data1/hxy/DPV2/checkpoints/depth_anything_v2_vits.pth"
+CKPT="/data1/hxy/Depth-Anything-V2/checkpoints/depth_anything_v2_vits.pth"
 TRAIN_LIST="/data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/train_half.txt"
 VAL_LIST="/data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/val.txt"
-SAVE_PATH="runs/flsea_latent_prior_stage1"
+SAVE_PATH="runs/research1_latent_prior_stage1"
 
 ENCODER="vits"
 IMG_SIZE=518

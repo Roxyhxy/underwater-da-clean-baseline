@@ -59,16 +59,14 @@ This is meant to be the new stable base before adding:
 
 ## Evaluation
 
-Use the evaluation scripts with different intent:
+Use these two scripts as the only primary evaluation entrypoints:
 
 - `scripts/eval_flsea_baseline_legacy.sh`:
-  recommended final FLSea baseline reproduction. It follows the verified `DA_0` evaluation path, uses original image resolution, and is the script you should quote when comparing against your historical strong baseline.
-- `scripts/eval_flsea_baseline.sh`:
-  clean loader-based evaluation path for the current repo. Useful for controlled ablations, but do not mix its numbers with the legacy baseline without stating the protocol difference.
-- `scripts/eval_flsea_baseline_aligned.sh`:
-  scale-shift aligned evaluation for relative-depth checkpoints under the clean loader.
+  verified baseline reproduction on FLSea with the same protocol as the strong `DA_0` result.
+- `scripts/eval_flsea_latent_prior.sh`:
+  latent-prior evaluation under the exact same FLSea protocol, so its numbers are directly comparable to the baseline above.
 
-For your next-stage research-one experiments, treat `eval_flsea_baseline_legacy.sh` as the primary baseline metric source.
+For research-one experiments, compare every model against `eval_flsea_baseline_legacy.sh`, then report the matching latent-prior result from `eval_flsea_latent_prior.sh`.
 
 ## Server Run
 
@@ -107,6 +105,14 @@ Default behavior of the latent-prior script:
 - keeps the standard depth head trainable
 - trains `UnderwaterLatentPriorEncoder` plus the new deg-map/global-modulation path
 - saves full checkpoints because this branch is no longer LoRA-only
+
+Recommended first-round research-one rule:
+
+- keep `CONSISTENCY_HARDNESS_WEIGHT=0.0`
+- keep `CONSISTENCY_AUG_PROB=0.0`
+- freeze the backbone first
+- compare only against `scripts/eval_flsea_baseline_legacy.sh`
+- use `scripts/eval_flsea_latent_prior.sh` for the final latent-prior number under the same FLSea protocol
 
 Optional overrides:
 
