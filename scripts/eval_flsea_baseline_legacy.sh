@@ -7,7 +7,8 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT_DIR}"
 
 # =========================
-# Edit this block directly
+# Recommended final baseline reproduction:
+# DA_0-compatible FLSea evaluation at original image resolution.
 # =========================
 PYTHON_BIN="python"
 # Match DA_0/run_FLSea.sh by default.

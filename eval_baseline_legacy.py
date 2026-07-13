@@ -149,16 +149,20 @@ def main():
         logger.info("No valid samples for evaluation.")
         return
 
+    metric_keys = ["d1", "d2", "d3", "abs_rel", "sq_rel", "rmse", "rmse_log", "log10", "silog"]
+    print("Evaluation Results:")
     logger.info("Final Evaluation Results:")
-    for key in ["d1", "d2", "d3", "abs_rel", "sq_rel", "rmse", "rmse_log", "log10", "silog"]:
+    for key in metric_keys:
+        print(f"{key}: {metrics[key]:.4f}")
         logger.info("%8s: %.4f" % (key, metrics[key]))
 
     metrics_path = os.path.join(args.save_dir, "metrics.txt")
     with open(metrics_path, "w", encoding="utf-8") as handle:
         handle.write("Final Evaluation Results:\n")
-        for key in ["d1", "d2", "d3", "abs_rel", "sq_rel", "rmse", "rmse_log", "log10", "silog"]:
+        for key in metric_keys:
             handle.write(f"{key:>8}: {metrics[key]:.4f}\n")
     logger.info("Saved metrics to %s" % metrics_path)
+    print(f"Log saved to: {os.path.join(args.save_dir, 'eval.log')}")
 
 
 if __name__ == "__main__":

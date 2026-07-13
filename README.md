@@ -4,7 +4,7 @@ This project is a cleaned baseline extracted from `DA_16_lora_feature_distill_ad
 
 It keeps only the core path that is still worth building on:
 
-- `Depth Anything V2` metric-depth backbone
+- `Depth Anything V2` backbone as the controllable base model
 - encoder LoRA with `aquadegrade` style routing
 - optional decoder ConvLoRA
 - main depth supervision in the aligned evaluation space
@@ -30,7 +30,7 @@ It intentionally removes the exploratory branches that made the old project hard
 - `models/depth_anything_latent_prior.py`: independent latent-prior depth model
 - `models/underwater_latent_prior.py`: latent prior encoder + explicit deg-map generators
 - `dataset/flsea.py`: FLSea loader from split text files
-- `depth_anything_v2/`: copied from `Depth-Anything-V2/metric_depth`
+- `depth_anything_v2/`: synced with the verified `DA_0` baseline package used for FLSea reproduction
 
 ## Expected FLSea split format
 
@@ -56,6 +56,19 @@ This is meant to be the new stable base before adding:
 1. optional sparse-prior injection
 2. transmission / medium branch
 3. any teacher or distillation design
+
+## Evaluation
+
+Use the evaluation scripts with different intent:
+
+- `scripts/eval_flsea_baseline_legacy.sh`:
+  recommended final FLSea baseline reproduction. It follows the verified `DA_0` evaluation path, uses original image resolution, and is the script you should quote when comparing against your historical strong baseline.
+- `scripts/eval_flsea_baseline.sh`:
+  clean loader-based evaluation path for the current repo. Useful for controlled ablations, but do not mix its numbers with the legacy baseline without stating the protocol difference.
+- `scripts/eval_flsea_baseline_aligned.sh`:
+  scale-shift aligned evaluation for relative-depth checkpoints under the clean loader.
+
+For your next-stage research-one experiments, treat `eval_flsea_baseline_legacy.sh` as the primary baseline metric source.
 
 ## Server Run
 
