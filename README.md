@@ -125,6 +125,7 @@ The core latent-prior ablation keeps the backbone, original DPT head, loss, data
 bash scripts/train_flsea_latent_prior_ablation.sh global_only
 bash scripts/train_flsea_latent_prior_ablation.sh local_only
 bash scripts/train_flsea_latent_prior_ablation.sh no_fft
+bash scripts/train_flsea_latent_prior_ablation.sh no_deg_map
 bash scripts/train_flsea_latent_prior_ablation.sh full
 ```
 
@@ -134,8 +135,54 @@ Each run uses five epochs and writes to `runs/ablation_<variant>`. Evaluate the 
 bash scripts/eval_flsea_latent_prior_ablation.sh global_only
 bash scripts/eval_flsea_latent_prior_ablation.sh local_only
 bash scripts/eval_flsea_latent_prior_ablation.sh no_fft
+bash scripts/eval_flsea_latent_prior_ablation.sh no_deg_map
 bash scripts/eval_flsea_latent_prior_ablation.sh full
 ```
+
+### Research-one experiment matrix
+
+All primary runs use the same checkpoint, FLSea train/validation split, five epochs,
+relative-depth loss, FP32, seed 42, and legacy disparity scale-shift evaluation.
+
+| Experiment | Command | Trainable parameters | Purpose |
+| --- | --- | --- | --- |
+| B0 Original DA V2 | `bash scripts/eval_flsea_baseline_legacy.sh` | none | frozen reference |
+| B1 Decoder FT | `bash scripts/train_flsea_capacity_control.sh decoder_ft` | original DPT decoder | generic decoder adaptation |
+| B2 Conv Adapter | `bash scripts/train_flsea_capacity_control.sh conv_adapter` | four plain residual adapters | parameter-matched capacity control |
+| B3 AquaDegrade LoRA | `bash scripts/train_flsea_aquadegrade_lora_control.sh` | encoder/decoder LoRA and degradation encoder | previous method control |
+| A1 Global only | `bash scripts/train_flsea_latent_prior_ablation.sh global_only` | global latent branch | global degradation descriptor |
+| A2 Local only | `bash scripts/train_flsea_latent_prior_ablation.sh local_only` | local prior and deg-map branch | spatial degradation prior |
+| A3 No FFT | `bash scripts/train_flsea_latent_prior_ablation.sh no_fft` | full prior except FFT branch | frequency prior contribution |
+| A4 No deg map | `bash scripts/train_flsea_latent_prior_ablation.sh no_deg_map` | full prior except map generator | explicit spatial map contribution |
+| A5 Full | `bash scripts/train_flsea_latent_prior_ablation.sh full` | latent encoder and prior injection | proposed core model |
+| L1 Full + consistency | `bash scripts/train_flsea_latent_prior_consistency.sh` | same as A5 | loss contribution after structure is fixed |
+| L2 Full + decoder | `bash scripts/train_flsea_capacity_control.sh full_decoder` | A5 plus original decoder | capacity upper bound, not the fair core comparison |
+
+Run the primary structure experiments first in this order:
+
+```bash
+bash scripts/train_flsea_capacity_control.sh decoder_ft
+bash scripts/train_flsea_capacity_control.sh conv_adapter
+bash scripts/train_flsea_latent_prior_ablation.sh global_only
+bash scripts/train_flsea_latent_prior_ablation.sh local_only
+bash scripts/train_flsea_latent_prior_ablation.sh no_fft
+bash scripts/train_flsea_latent_prior_ablation.sh no_deg_map
+bash scripts/train_flsea_latent_prior_ablation.sh full
+```
+
+Only after A5 is stable, run the loss and upper-bound experiments:
+
+```bash
+bash scripts/train_flsea_latent_prior_consistency.sh
+bash scripts/train_flsea_capacity_control.sh full_decoder
+```
+
+Test-set evaluation uses the matching `eval_flsea_*` scripts. Each script loads
+`best_abs_rel.pth`; do not select a checkpoint using test-set results.
+
+For B3, use `bash scripts/eval_flsea_aquadegrade_lora_control.sh`; it deliberately
+replaces the old loader-based validation with the same original-resolution legacy
+alignment protocol used by every other row.
 
 Optional overrides:
 

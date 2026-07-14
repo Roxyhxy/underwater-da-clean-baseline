@@ -45,6 +45,7 @@ def summarize_trainable_parameters(model):
     summary = {
         "latent_prior": [],
         "prior_head": [],
+        "plain_adapter": [],
         "base_head": [],
         "backbone": [],
     }
@@ -53,6 +54,8 @@ def summarize_trainable_parameters(model):
             continue
         if name.startswith("latent_prior_encoder."):
             summary["latent_prior"].append((name, param))
+        elif name.startswith("depth_head.plain_adapters."):
+            summary["plain_adapter"].append((name, param))
         elif name.startswith("depth_head.global_mod.") or name.startswith("depth_head.deg_map_generator.") or name.startswith(
             "depth_head.prior_to_feat."
         ):
@@ -70,6 +73,7 @@ def build_optimizer(model, args):
 
     latent_prior_params = [param for _, param in summary["latent_prior"]]
     prior_head_params = [param for _, param in summary["prior_head"]]
+    plain_adapter_params = [param for _, param in summary["plain_adapter"]]
     base_head_params = [param for _, param in summary["base_head"]]
     backbone_params = [param for _, param in summary["backbone"]]
 
@@ -77,10 +81,14 @@ def build_optimizer(model, args):
         groups.append({"params": latent_prior_params, "lr": args.prior_lr or args.lr, "name": "latent_prior"})
     if prior_head_params:
         groups.append({"params": prior_head_params, "lr": args.prior_head_lr or args.lr, "name": "prior_head"})
+    if plain_adapter_params:
+        groups.append({"params": plain_adapter_params, "lr": args.adapter_lr or args.lr, "name": "plain_adapter"})
     if base_head_params:
         groups.append({"params": base_head_params, "lr": args.head_lr or args.lr, "name": "base_head"})
     if backbone_params:
         groups.append({"params": backbone_params, "lr": args.backbone_lr or args.lr, "name": "backbone"})
+    if not groups:
+        raise ValueError("No trainable parameters. Check the freeze and structure flags.")
     return AdamW(groups, lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
 
 
@@ -95,6 +103,7 @@ def main():
     parser.add_argument("--prior-head-lr", default=0.0, type=float)
     parser.add_argument("--head-lr", default=0.0, type=float)
     parser.add_argument("--backbone-lr", default=0.0, type=float)
+    parser.add_argument("--adapter-lr", default=0.0, type=float)
     parser.add_argument("--pretrained-from", required=True)
     parser.add_argument("--init-from", default="")
     parser.add_argument("--save-path", required=True)
@@ -112,6 +121,9 @@ def main():
     parser.add_argument("--disable-global-prior", action="store_true")
     parser.add_argument("--disable-local-prior", action="store_true")
     parser.add_argument("--disable-fft-prior", action="store_true")
+    parser.add_argument("--disable-deg-map", action="store_true")
+    parser.add_argument("--plain-adapter", action="store_true")
+    parser.add_argument("--adapter-hidden", default=256, type=int)
     parser.add_argument("--freeze-backbone", action="store_true")
     parser.add_argument("--freeze-base-head", action="store_true")
     parser.add_argument("--freeze-latent-prior", action="store_true")
@@ -183,6 +195,9 @@ def main():
         use_global_prior=not args.disable_global_prior,
         use_local_prior=not args.disable_local_prior,
         use_fft_prior=not args.disable_fft_prior,
+        use_deg_map=not args.disable_deg_map,
+        use_plain_adapter=args.plain_adapter,
+        adapter_hidden=args.adapter_hidden,
     ).to(device)
     model.load_base_weights(base_ckpt, strict=False)
     base_load_stats = model.base_load_stats
@@ -206,11 +221,13 @@ def main():
         train_latent_prior=not args.freeze_latent_prior,
     )
     logger.info(
-        "Prior structure: global=%s local=%s fft=%s"
+        "Prior structure: global=%s local=%s fft=%s deg_map=%s plain_adapter=%s"
         % (
             str(not args.disable_global_prior),
             str(not args.disable_local_prior),
             str(not args.disable_fft_prior),
+            str(not args.disable_deg_map),
+            str(args.plain_adapter),
         )
     )
 
@@ -222,10 +239,11 @@ def main():
 
     param_summary = summarize_trainable_parameters(model)
     logger.info(
-        "Trainable params | latent_prior=%d | prior_head=%d | base_head=%d | backbone=%d"
+        "Trainable params | latent_prior=%d | prior_head=%d | plain_adapter=%d | base_head=%d | backbone=%d"
         % (
             _count_params([param for _, param in param_summary["latent_prior"]]),
             _count_params([param for _, param in param_summary["prior_head"]]),
+            _count_params([param for _, param in param_summary["plain_adapter"]]),
             _count_params([param for _, param in param_summary["base_head"]]),
             _count_params([param for _, param in param_summary["backbone"]]),
         )

@@ -111,6 +111,9 @@ def load_model(args, device, logger):
         use_global_prior=not args.disable_global_prior,
         use_local_prior=not args.disable_local_prior,
         use_fft_prior=not args.disable_fft_prior,
+        use_deg_map=not args.disable_deg_map,
+        use_plain_adapter=args.plain_adapter,
+        adapter_hidden=args.adapter_hidden,
     ).to(device)
     model.load_base_weights(base_ckpt, strict=False)
     base_load_stats = model.base_load_stats
@@ -131,7 +134,7 @@ def load_model(args, device, logger):
 
     state = torch.load(args.load_from, map_location="cpu")
     state = state["model"] if isinstance(state, dict) and "model" in state else state
-    load_msg = model.load_state_dict(state, strict=False)
+    load_msg = model.load_state_dict(state, strict=True)
     model = model.to(device).eval()
     logger.info("Loaded checkpoint: %s" % args.load_from)
     logger.info("Checkpoint load message: %s" % str(load_msg))
@@ -224,6 +227,9 @@ def main():
     parser.add_argument("--disable-global-prior", action="store_true")
     parser.add_argument("--disable-local-prior", action="store_true")
     parser.add_argument("--disable-fft-prior", action="store_true")
+    parser.add_argument("--disable-deg-map", action="store_true")
+    parser.add_argument("--plain-adapter", action="store_true")
+    parser.add_argument("--adapter-hidden", default=256, type=int)
     parser.add_argument("--save-dir", required=True)
     parser.add_argument("--save-depth", action="store_true")
     parser.add_argument("--depth-output-dir", default="")

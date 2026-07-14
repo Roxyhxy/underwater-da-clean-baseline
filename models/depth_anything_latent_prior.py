@@ -54,6 +54,25 @@ class GlobalDegradationModulation(nn.Module):
         return feat * (1.0 + scale * gamma) + scale * beta
 
 
+class PlainResidualConvAdapter(nn.Module):
+    """Parameter-matched content adapter without degradation conditioning."""
+
+    def __init__(self, channels, hidden_channels=256):
+        super().__init__()
+        self.body = nn.Sequential(
+            nn.Conv2d(channels, hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, channels, kernel_size=1),
+        )
+        nn.init.zeros_(self.body[-1].weight)
+        nn.init.zeros_(self.body[-1].bias)
+
+    def forward(self, feat):
+        return feat + self.body(feat)
+
+
 class LatentPriorDPTHead(nn.Module):
     """Depth head with latent-prior bottleneck modulation and explicit deg-map fusion."""
 
@@ -69,12 +88,17 @@ class LatentPriorDPTHead(nn.Module):
         deg_map_scale=0.2,
         use_global_prior=True,
         use_local_prior=True,
+        use_deg_map=True,
+        use_plain_adapter=False,
+        adapter_hidden=256,
     ):
         super().__init__()
         self.use_clstoken = use_clstoken
         self.deg_map_scale = float(deg_map_scale)
         self.use_global_prior = bool(use_global_prior)
         self.use_local_prior = bool(use_local_prior)
+        self.use_deg_map = bool(use_deg_map)
+        self.use_plain_adapter = bool(use_plain_adapter)
 
         self.projects = nn.ModuleList(
             [
@@ -155,6 +179,9 @@ class LatentPriorDPTHead(nn.Module):
         self.prior_to_feat = nn.ModuleList(
             [nn.Conv2d(ch, features, kernel_size=1, bias=False) for ch in prior_channels]
         )
+        self.plain_adapters = nn.ModuleList(
+            [PlainResidualConvAdapter(features, adapter_hidden) for _ in range(4)]
+        ) if self.use_plain_adapter else nn.ModuleList()
         self.reset_prior_injection()
 
     def reset_prior_injection(self):
@@ -191,8 +218,15 @@ class LatentPriorDPTHead(nn.Module):
         layer_4_rn = self.scratch.layer4_rn(layer_4)
 
         layer_feats = [layer_1_rn, layer_2_rn, layer_3_rn, layer_4_rn]
+        if self.use_plain_adapter:
+            layer_feats = [adapter(feat) for adapter, feat in zip(self.plain_adapters, layer_feats)]
+            layer_1_rn, layer_2_rn, layer_3_rn, layer_4_rn = layer_feats
+
         if self.use_local_prior:
-            deg_maps = self.deg_map_generator(layer_feats, prior_pyramid)
+            if self.use_deg_map:
+                deg_maps = self.deg_map_generator(layer_feats, prior_pyramid)
+            else:
+                deg_maps = [feat.new_ones(feat.shape[0], 1, *feat.shape[-2:]) for feat in layer_feats]
             injected = []
             for index, (feat, prior, deg_map) in enumerate(zip(layer_feats, prior_pyramid, deg_maps)):
                 self._deg_index = index
@@ -257,6 +291,9 @@ class DepthAnythingLatentPrior(nn.Module):
         use_global_prior=True,
         use_local_prior=True,
         use_fft_prior=True,
+        use_deg_map=True,
+        use_plain_adapter=False,
+        adapter_hidden=256,
     ):
         super().__init__()
         self.intermediate_layer_idx = {
@@ -270,6 +307,9 @@ class DepthAnythingLatentPrior(nn.Module):
         self.use_global_prior = bool(use_global_prior)
         self.use_local_prior = bool(use_local_prior)
         self.use_fft_prior = bool(use_fft_prior)
+        self.use_deg_map = bool(use_deg_map)
+        self.use_plain_adapter = bool(use_plain_adapter)
+        self.latent_dim = int(latent_dim)
         self.pretrained = DINOv2(model_name=encoder)
         self.latent_prior_encoder = UnderwaterLatentPriorEncoder(
             in_ch=3,
@@ -291,6 +331,9 @@ class DepthAnythingLatentPrior(nn.Module):
             deg_map_scale=deg_map_scale,
             use_global_prior=self.use_global_prior,
             use_local_prior=self.use_local_prior,
+            use_deg_map=self.use_deg_map,
+            use_plain_adapter=self.use_plain_adapter,
+            adapter_hidden=adapter_hidden,
         )
 
     def load_base_weights(self, state_dict, strict=False):
@@ -301,6 +344,7 @@ class DepthAnythingLatentPrior(nn.Module):
             "depth_head.global_mod.",
             "depth_head.deg_map_generator.",
             "depth_head.prior_to_feat.",
+            "depth_head.plain_adapters.",
         )
         for key, value in state_dict.items():
             if key.startswith("module."):
@@ -336,6 +380,7 @@ class DepthAnythingLatentPrior(nn.Module):
             "global_mod.",
             "deg_map_generator.",
             "prior_to_feat.",
+            "plain_adapters.",
         )
         for name, param in self.depth_head.named_parameters():
             param.requires_grad = any(name.startswith(prefix) for prefix in protected_prefixes)
@@ -358,6 +403,9 @@ class DepthAnythingLatentPrior(nn.Module):
             param.requires_grad = bool(trainable)
 
     def freeze_disabled_prior_components(self):
+        if not self.use_deg_map:
+            self._set_module_trainable(self.depth_head.deg_map_generator, False)
+
         if not self.use_local_prior:
             self._set_module_trainable(self.depth_head.deg_map_generator, False)
             self._set_module_trainable(self.depth_head.prior_to_feat, False)
@@ -373,6 +421,9 @@ class DepthAnythingLatentPrior(nn.Module):
 
         if not self.use_global_prior and not self.use_local_prior:
             self._set_module_trainable(self.latent_prior_encoder, False)
+
+        if not self.use_plain_adapter:
+            self._set_module_trainable(self.depth_head.plain_adapters, False)
 
     def configure_trainable(
         self,
@@ -401,7 +452,11 @@ class DepthAnythingLatentPrior(nn.Module):
         out_features = self.pretrained.get_intermediate_layers(
             image, self.intermediate_layer_idx[self.encoder], return_class_token=True
         )
-        z_deg, prior_pyramid = self.latent_prior_encoder(image)
+        if self.use_global_prior or self.use_local_prior:
+            z_deg, prior_pyramid = self.latent_prior_encoder(image)
+        else:
+            z_deg = image.new_zeros(image.shape[0], self.latent_dim)
+            prior_pyramid = [None] * 4
         depth = self.depth_head(
             out_features,
             patch_h,

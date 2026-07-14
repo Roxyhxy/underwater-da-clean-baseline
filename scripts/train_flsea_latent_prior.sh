@@ -16,7 +16,7 @@ export CUDA_VISIBLE_DEVICES=1
 PYTHON_BIN="python"
 CKPT="/data1/hxy/Depth-Anything-V2/checkpoints/depth_anything_v2_vits.pth"
 TRAIN_LIST="/data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/train_half.txt"
-VAL_LIST="/data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/val.txt"
+VAL_LIST="/data1/hxy/Depth-Anything-V2/DA_0/dataset/splits/flsea/val.txt"
 SAVE_PATH="runs/research1_latent_prior_frozen_head_fp32"
 
 ENCODER="vits"

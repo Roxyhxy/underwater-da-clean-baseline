@@ -11,6 +11,7 @@ cd "${ROOT_DIR}"
 #   bash scripts/train_flsea_latent_prior_ablation.sh global_only
 #   bash scripts/train_flsea_latent_prior_ablation.sh local_only
 #   bash scripts/train_flsea_latent_prior_ablation.sh no_fft
+#   bash scripts/train_flsea_latent_prior_ablation.sh no_deg_map
 VARIANT="${1:-full}"
 if [[ $# -gt 0 ]]; then
   shift
@@ -62,9 +63,12 @@ case "${VARIANT}" in
   no_fft)
     STRUCTURE_ARGS+=(--disable-fft-prior)
     ;;
+  no_deg_map)
+    STRUCTURE_ARGS+=(--disable-deg-map)
+    ;;
   *)
     echo "Unknown variant: ${VARIANT}"
-    echo "Choose one of: full, global_only, local_only, no_fft"
+    echo "Choose one of: full, global_only, local_only, no_fft, no_deg_map"
     exit 2
     ;;
 esac

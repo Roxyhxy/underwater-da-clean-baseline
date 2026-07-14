@@ -406,6 +406,13 @@ class DepthAnythingLoRA(nn.Module):
         finally:
             self._set_style_context(None)
 
+    @torch.no_grad()
+    def infer_image(self, raw_image, input_size=518):
+        image, (h, w) = self.base.image2tensor(raw_image, input_size)
+        depth = self.forward(image)
+        depth = F.interpolate(depth[:, None], (h, w), mode="bilinear", align_corners=True)[0, 0]
+        return depth.cpu().numpy()
+
 
 def extract_lora_state_dict(model):
     prefixes = (
@@ -421,4 +428,3 @@ def extract_lora_state_dict(model):
         elif ".lora_" in key:
             keep[key] = value
     return keep
-

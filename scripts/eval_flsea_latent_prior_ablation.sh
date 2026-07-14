@@ -32,9 +32,12 @@ case "${VARIANT}" in
   no_fft)
     STRUCTURE_ARGS+=(--disable-fft-prior)
     ;;
+  no_deg_map)
+    STRUCTURE_ARGS+=(--disable-deg-map)
+    ;;
   *)
     echo "Unknown variant: ${VARIANT}"
-    echo "Choose one of: full, global_only, local_only, no_fft"
+    echo "Choose one of: full, global_only, local_only, no_fft, no_deg_map"
     exit 2
     ;;
 esac
