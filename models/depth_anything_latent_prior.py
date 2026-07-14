@@ -67,10 +67,14 @@ class LatentPriorDPTHead(nn.Module):
         out_channels=(256, 512, 1024, 1024),
         use_clstoken=False,
         deg_map_scale=0.2,
+        use_global_prior=True,
+        use_local_prior=True,
     ):
         super().__init__()
         self.use_clstoken = use_clstoken
         self.deg_map_scale = float(deg_map_scale)
+        self.use_global_prior = bool(use_global_prior)
+        self.use_local_prior = bool(use_local_prior)
 
         self.projects = nn.ModuleList(
             [
@@ -187,18 +191,18 @@ class LatentPriorDPTHead(nn.Module):
         layer_4_rn = self.scratch.layer4_rn(layer_4)
 
         layer_feats = [layer_1_rn, layer_2_rn, layer_3_rn, layer_4_rn]
-        deg_maps = self.deg_map_generator(layer_feats, prior_pyramid)
+        if self.use_local_prior:
+            deg_maps = self.deg_map_generator(layer_feats, prior_pyramid)
+            injected = []
+            for index, (feat, prior, deg_map) in enumerate(zip(layer_feats, prior_pyramid, deg_maps)):
+                self._deg_index = index
+                injected.append(self._inject_deg_prior(feat, prior, deg_map))
+            layer_1_rn, layer_2_rn, layer_3_rn, layer_4_rn = injected
+        else:
+            deg_maps = [feat.new_zeros(feat.shape[0], 1, *feat.shape[-2:]) for feat in layer_feats]
 
-        self._deg_index = 0
-        layer_1_rn = self._inject_deg_prior(layer_1_rn, prior_pyramid[0], deg_maps[0])
-        self._deg_index = 1
-        layer_2_rn = self._inject_deg_prior(layer_2_rn, prior_pyramid[1], deg_maps[1])
-        self._deg_index = 2
-        layer_3_rn = self._inject_deg_prior(layer_3_rn, prior_pyramid[2], deg_maps[2])
-        self._deg_index = 3
-        layer_4_rn = self._inject_deg_prior(layer_4_rn, prior_pyramid[3], deg_maps[3])
-
-        layer_4_rn = self.global_mod(layer_4_rn, z_deg)
+        if self.use_global_prior:
+            layer_4_rn = self.global_mod(layer_4_rn, z_deg)
 
         path_4 = self.scratch.refinenet4(layer_4_rn, size=layer_3_rn.shape[2:])
         path_3 = self.scratch.refinenet3(path_4, layer_3_rn, size=layer_2_rn.shape[2:])
@@ -250,6 +254,9 @@ class DepthAnythingLatentPrior(nn.Module):
         prior_fft_size=64,
         prior_stat_hidden=64,
         deg_map_scale=0.2,
+        use_global_prior=True,
+        use_local_prior=True,
+        use_fft_prior=True,
     ):
         super().__init__()
         self.intermediate_layer_idx = {
@@ -260,6 +267,9 @@ class DepthAnythingLatentPrior(nn.Module):
         }
         self.max_depth = max_depth
         self.encoder = encoder
+        self.use_global_prior = bool(use_global_prior)
+        self.use_local_prior = bool(use_local_prior)
+        self.use_fft_prior = bool(use_fft_prior)
         self.pretrained = DINOv2(model_name=encoder)
         self.latent_prior_encoder = UnderwaterLatentPriorEncoder(
             in_ch=3,
@@ -268,6 +278,7 @@ class DepthAnythingLatentPrior(nn.Module):
             global_dim=latent_dim,
             fft_size=prior_fft_size,
             stat_hidden=prior_stat_hidden,
+            use_fft_prior=self.use_fft_prior,
         )
         self.depth_head = LatentPriorDPTHead(
             in_channels=self.pretrained.embed_dim,
@@ -278,6 +289,8 @@ class DepthAnythingLatentPrior(nn.Module):
             out_channels=list(out_channels),
             use_clstoken=False,
             deg_map_scale=deg_map_scale,
+            use_global_prior=self.use_global_prior,
+            use_local_prior=self.use_local_prior,
         )
 
     def load_base_weights(self, state_dict, strict=False):
@@ -339,6 +352,28 @@ class DepthAnythingLatentPrior(nn.Module):
         for param in self.latent_prior_encoder.parameters():
             param.requires_grad = True
 
+    @staticmethod
+    def _set_module_trainable(module, trainable):
+        for param in module.parameters():
+            param.requires_grad = bool(trainable)
+
+    def freeze_disabled_prior_components(self):
+        if not self.use_local_prior:
+            self._set_module_trainable(self.depth_head.deg_map_generator, False)
+            self._set_module_trainable(self.depth_head.prior_to_feat, False)
+            self._set_module_trainable(self.latent_prior_encoder.pyramid_proj, False)
+
+        if not self.use_global_prior:
+            self._set_module_trainable(self.depth_head.global_mod, False)
+            self._set_module_trainable(self.latent_prior_encoder.global_pool, False)
+            self._set_module_trainable(self.latent_prior_encoder.global_fft, False)
+            self._set_module_trainable(self.latent_prior_encoder.global_fuse, False)
+        elif not self.use_fft_prior:
+            self._set_module_trainable(self.latent_prior_encoder.global_fft, False)
+
+        if not self.use_global_prior and not self.use_local_prior:
+            self._set_module_trainable(self.latent_prior_encoder, False)
+
     def configure_trainable(
         self,
         freeze_backbone=True,
@@ -359,6 +394,7 @@ class DepthAnythingLatentPrior(nn.Module):
             self.unfreeze_latent_prior_encoder()
         else:
             self.freeze_latent_prior_encoder()
+        self.freeze_disabled_prior_components()
 
     def forward(self, image, return_aux=False):
         patch_h, patch_w = image.shape[-2] // 14, image.shape[-1] // 14

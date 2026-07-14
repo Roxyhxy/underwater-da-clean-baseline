@@ -108,6 +108,9 @@ def load_model(args, device, logger):
         prior_fft_size=args.prior_fft_size,
         prior_stat_hidden=args.prior_stat_hidden,
         deg_map_scale=args.deg_map_scale,
+        use_global_prior=not args.disable_global_prior,
+        use_local_prior=not args.disable_local_prior,
+        use_fft_prior=not args.disable_fft_prior,
     ).to(device)
     model.load_base_weights(base_ckpt, strict=False)
     base_load_stats = model.base_load_stats
@@ -218,6 +221,9 @@ def main():
     parser.add_argument("--prior-fft-size", default=64, type=int)
     parser.add_argument("--prior-stat-hidden", default=64, type=int)
     parser.add_argument("--deg-map-scale", default=0.2, type=float)
+    parser.add_argument("--disable-global-prior", action="store_true")
+    parser.add_argument("--disable-local-prior", action="store_true")
+    parser.add_argument("--disable-fft-prior", action="store_true")
     parser.add_argument("--save-dir", required=True)
     parser.add_argument("--save-depth", action="store_true")
     parser.add_argument("--depth-output-dir", default="")

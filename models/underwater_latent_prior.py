@@ -156,12 +156,14 @@ class UnderwaterLatentPriorEncoder(nn.Module):
         global_dim=128,
         fft_size=64,
         stat_hidden=64,
+        use_fft_prior=True,
     ):
         super().__init__()
         if len(pyramid_channels) != 4:
             raise ValueError("pyramid_channels must contain exactly 4 stages")
 
         c1, c2, c3, c4 = [int(c) for c in pyramid_channels]
+        self.use_fft_prior = bool(use_fft_prior)
         self.stem = nn.Sequential(
             ConvNormAct(in_ch, base_ch, stride=1),
             ConvNormAct(base_ch, c1, stride=1),
@@ -213,7 +215,7 @@ class UnderwaterLatentPriorEncoder(nn.Module):
             self.pyramid_proj[3](p4),
         ]
         z_spatial = self.global_pool(p4)
-        z_fft = self.global_fft(image)
+        z_fft = self.global_fft(image) if self.use_fft_prior else torch.zeros_like(z_spatial)
         z_deg = self.global_fuse(torch.cat([z_spatial, z_fft], dim=1))
         return z_deg, pyramid
 

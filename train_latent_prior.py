@@ -109,6 +109,9 @@ def main():
     parser.add_argument("--prior-fft-size", default=64, type=int)
     parser.add_argument("--prior-stat-hidden", default=64, type=int)
     parser.add_argument("--deg-map-scale", default=0.2, type=float)
+    parser.add_argument("--disable-global-prior", action="store_true")
+    parser.add_argument("--disable-local-prior", action="store_true")
+    parser.add_argument("--disable-fft-prior", action="store_true")
     parser.add_argument("--freeze-backbone", action="store_true")
     parser.add_argument("--freeze-base-head", action="store_true")
     parser.add_argument("--freeze-latent-prior", action="store_true")
@@ -177,6 +180,9 @@ def main():
         prior_fft_size=args.prior_fft_size,
         prior_stat_hidden=args.prior_stat_hidden,
         deg_map_scale=args.deg_map_scale,
+        use_global_prior=not args.disable_global_prior,
+        use_local_prior=not args.disable_local_prior,
+        use_fft_prior=not args.disable_fft_prior,
     ).to(device)
     model.load_base_weights(base_ckpt, strict=False)
     base_load_stats = model.base_load_stats
@@ -198,6 +204,14 @@ def main():
         freeze_backbone=args.freeze_backbone,
         freeze_base_head=args.freeze_base_head,
         train_latent_prior=not args.freeze_latent_prior,
+    )
+    logger.info(
+        "Prior structure: global=%s local=%s fft=%s"
+        % (
+            str(not args.disable_global_prior),
+            str(not args.disable_local_prior),
+            str(not args.disable_fft_prior),
+        )
     )
 
     if args.init_from:

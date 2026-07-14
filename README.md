@@ -117,6 +117,26 @@ Recommended first-round research-one rule:
 - compare only against `scripts/eval_flsea_baseline_legacy.sh`
 - use `scripts/eval_flsea_latent_prior.sh` for the final latent-prior number under the same FLSea protocol
 
+### Core structure ablation
+
+The core latent-prior ablation keeps the backbone, original DPT head, loss, data split, and optimizer settings fixed. Only the enabled prior structure changes:
+
+```bash
+bash scripts/train_flsea_latent_prior_ablation.sh global_only
+bash scripts/train_flsea_latent_prior_ablation.sh local_only
+bash scripts/train_flsea_latent_prior_ablation.sh no_fft
+bash scripts/train_flsea_latent_prior_ablation.sh full
+```
+
+Each run uses five epochs and writes to `runs/ablation_<variant>`. Evaluate the selected `best_abs_rel.pth` on the fixed test split with:
+
+```bash
+bash scripts/eval_flsea_latent_prior_ablation.sh global_only
+bash scripts/eval_flsea_latent_prior_ablation.sh local_only
+bash scripts/eval_flsea_latent_prior_ablation.sh no_fft
+bash scripts/eval_flsea_latent_prior_ablation.sh full
+```
+
 Optional overrides:
 
 ```bash
