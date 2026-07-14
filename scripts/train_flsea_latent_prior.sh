@@ -51,6 +51,7 @@ GRAD_CLIP=1.0
 FREEZE_BACKBONE="true"
 FREEZE_BASE_HEAD="true"
 FREEZE_LATENT_PRIOR="false"
+EVAL_BEFORE_TRAIN="true"
 
 EXTRA_ARGS=("$@")
 
@@ -112,6 +113,9 @@ if [[ "${FREEZE_BASE_HEAD}" == "true" ]]; then
 fi
 if [[ "${FREEZE_LATENT_PRIOR}" == "true" ]]; then
   CMD+=(--freeze-latent-prior)
+fi
+if [[ "${EVAL_BEFORE_TRAIN}" == "true" ]]; then
+  CMD+=(--eval-before-train)
 fi
 
 CMD+=("${EXTRA_ARGS[@]}")

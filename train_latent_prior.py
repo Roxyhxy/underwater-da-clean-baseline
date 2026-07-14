@@ -131,6 +131,11 @@ def main():
     parser.add_argument("--log-interval", default=20, type=int)
     parser.add_argument("--amp", action="store_true", help="Enable CUDA automatic mixed precision")
     parser.add_argument("--grad-clip", default=1.0, type=float, help="Max gradient norm; <= 0 disables clipping")
+    parser.add_argument(
+        "--eval-before-train",
+        action="store_true",
+        help="Run the legacy aligned validation once before the first optimizer step",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.save_path, exist_ok=True)
@@ -174,6 +179,21 @@ def main():
         deg_map_scale=args.deg_map_scale,
     ).to(device)
     model.load_base_weights(base_ckpt, strict=False)
+    base_load_stats = model.base_load_stats
+    logger.info(
+        "Base checkpoint coverage: loaded=%d expected=%d missing=%d"
+        % (
+            base_load_stats["loaded"],
+            base_load_stats["expected"],
+            len(base_load_stats["missing"]),
+        )
+    )
+    if base_load_stats["missing"]:
+        preview = ", ".join(base_load_stats["missing"][:10])
+        raise RuntimeError(
+            "Base checkpoint is not architecture-compatible; missing %d pretrained keys. First keys: %s"
+            % (len(base_load_stats["missing"]), preview)
+        )
     model.configure_trainable(
         freeze_backbone=args.freeze_backbone,
         freeze_base_head=args.freeze_base_head,
@@ -220,6 +240,23 @@ def main():
     best_abs_rel = float("inf")
     best_d1 = 0.0
     global_step = 0
+
+    if args.eval_before_train:
+        model.eval()
+        initial_metrics = evaluate_latent_prior(
+            model,
+            val_pairs,
+            args.img_size,
+            device,
+            args.max_depth,
+            logger,
+        )
+        if initial_metrics is None:
+            raise RuntimeError("Pre-training validation found no valid samples")
+        logger.info(
+            "Pre-training baseline: "
+            + ", ".join([f"{key}={value:.4f}" for key, value in initial_metrics.items()])
+        )
 
     for epoch in range(args.epochs):
         model.train()

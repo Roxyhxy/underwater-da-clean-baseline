@@ -151,6 +151,13 @@ class LatentPriorDPTHead(nn.Module):
         self.prior_to_feat = nn.ModuleList(
             [nn.Conv2d(ch, features, kernel_size=1, bias=False) for ch in prior_channels]
         )
+        self.reset_prior_injection()
+
+    def reset_prior_injection(self):
+        # Start exactly from the pretrained depth head. The prior branch learns
+        # residual corrections instead of perturbing baseline features at step 0.
+        for projection in self.prior_to_feat:
+            nn.init.zeros_(projection.weight)
 
     def _inject_deg_prior(self, feat, prior, deg_map):
         if prior.shape[-2:] != feat.shape[-2:]:
@@ -276,12 +283,31 @@ class DepthAnythingLatentPrior(nn.Module):
     def load_base_weights(self, state_dict, strict=False):
         own_state = self.state_dict()
         filtered_state = {}
+        new_branch_prefixes = (
+            "latent_prior_encoder.",
+            "depth_head.global_mod.",
+            "depth_head.deg_map_generator.",
+            "depth_head.prior_to_feat.",
+        )
         for key, value in state_dict.items():
+            if key.startswith("module."):
+                key = key[len("module.") :]
             if key not in own_state:
                 continue
             if own_state[key].shape != value.shape:
                 continue
             filtered_state[key] = value
+
+        expected_base_keys = {
+            key for key in own_state if not key.startswith(new_branch_prefixes)
+        }
+        loaded_base_keys = expected_base_keys.intersection(filtered_state)
+        missing_base_keys = sorted(expected_base_keys - loaded_base_keys)
+        self.base_load_stats = {
+            "loaded": len(loaded_base_keys),
+            "expected": len(expected_base_keys),
+            "missing": missing_base_keys,
+        }
         return self.load_state_dict(filtered_state, strict=strict)
 
     def freeze_pretrained_backbone(self):
@@ -392,12 +418,5 @@ class DepthAnythingLatentPrior(nn.Module):
         image = cv2.cvtColor(raw_image, cv2.COLOR_BGR2RGB) / 255.0
         image = transform({"image": image})["image"]
         image = torch.from_numpy(image).unsqueeze(0)
-        device = (
-            "cuda"
-            if torch.cuda.is_available()
-            else "mps"
-            if torch.backends.mps.is_available()
-            else "cpu"
-        )
-        image = image.to(device)
+        image = image.to(next(self.parameters()).device)
         return image, (h, w)

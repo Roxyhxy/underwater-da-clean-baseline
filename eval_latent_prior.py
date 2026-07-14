@@ -110,6 +110,21 @@ def load_model(args, device, logger):
         deg_map_scale=args.deg_map_scale,
     ).to(device)
     model.load_base_weights(base_ckpt, strict=False)
+    base_load_stats = model.base_load_stats
+    logger.info(
+        "Base checkpoint coverage: loaded=%d expected=%d missing=%d"
+        % (
+            base_load_stats["loaded"],
+            base_load_stats["expected"],
+            len(base_load_stats["missing"]),
+        )
+    )
+    if base_load_stats["missing"]:
+        preview = ", ".join(base_load_stats["missing"][:10])
+        raise RuntimeError(
+            "Base checkpoint is not architecture-compatible; missing %d pretrained keys. First keys: %s"
+            % (len(base_load_stats["missing"]), preview)
+        )
 
     state = torch.load(args.load_from, map_location="cpu")
     state = state["model"] if isinstance(state, dict) and "model" in state else state
@@ -150,6 +165,23 @@ def evaluate_latent_prior(model, file_pairs, input_size, device, max_depth, logg
         if valid_mask.sum() < 10:
             logger.info("Skip sample with too few valid pixels: %s" % image_path)
             continue
+
+        if nsamples == 0:
+            target_disp = torch.zeros_like(gt_depth_t)
+            target_disp[valid_mask] = 1.0 / gt_depth_t[valid_mask]
+            scale, shift = metric.compute_scale_and_shift(pred_t, target_disp, valid_mask)
+            logger.info(
+                "Validation output diagnostic: pred_min=%.6f pred_max=%.6f pred_mean=%.6f "
+                "pred_std=%.6f align_scale=%.6f align_shift=%.6f"
+                % (
+                    pred_t.min().item(),
+                    pred_t.max().item(),
+                    pred_t.mean().item(),
+                    pred_t.std().item(),
+                    scale.item(),
+                    shift.item(),
+                )
+            )
 
         prediction = metric(pred_t, gt_depth_t, valid_mask)
         cur_results = eval_depth(prediction[valid_mask], gt_depth_t[valid_mask])
