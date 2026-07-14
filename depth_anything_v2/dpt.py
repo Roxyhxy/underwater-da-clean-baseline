@@ -110,7 +110,7 @@ class DPTHead(nn.Module):
             nn.Conv2d(head_features_1 // 2, head_features_2, kernel_size=3, stride=1, padding=1),
             nn.ReLU(True),
             nn.Conv2d(head_features_2, 1, kernel_size=1, stride=1, padding=0),
-            nn.Sigmoid()
+            nn.ReLU(True)
         )
     
     def forward(self, out_features, patch_h, patch_w):
@@ -168,8 +168,6 @@ class DepthAnythingV2(nn.Module):
             'vitg': [9, 19, 29, 39]
         }
         
-        self.max_depth = max_depth
-        
         self.encoder = encoder
         self.pretrained = DINOv2(model_name=encoder)
         
@@ -180,7 +178,7 @@ class DepthAnythingV2(nn.Module):
         
         features = self.pretrained.get_intermediate_layers(x, self.intermediate_layer_idx[self.encoder], return_class_token=True)
         
-        depth = self.depth_head(features, patch_h, patch_w) * self.max_depth
+        depth = self.depth_head(features, patch_h, patch_w)
         
         return depth.squeeze(1)
     

@@ -138,7 +138,7 @@ class LatentPriorDPTHead(nn.Module):
             nn.Conv2d(head_features_1 // 2, head_features_2, kernel_size=3, stride=1, padding=1),
             nn.ReLU(True),
             nn.Conv2d(head_features_2, 1, kernel_size=1, stride=1, padding=0),
-            nn.Sigmoid(),
+            nn.ReLU(True),
         )
 
         self.global_mod = GlobalDegradationModulation(latent_dim, features)
@@ -376,8 +376,8 @@ class DepthAnythingLatentPrior(nn.Module):
         )
         if return_aux:
             pred, aux = depth
-            return pred.squeeze(1) * self.max_depth, aux
-        return depth.squeeze(1) * self.max_depth
+            return pred.squeeze(1), aux
+        return depth.squeeze(1)
 
     @torch.no_grad()
     def infer_image(self, raw_image, input_size=518, return_aux=False):

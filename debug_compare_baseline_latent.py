@@ -90,11 +90,9 @@ def main():
     )
     tensor_diff("base_vs_zero_prior_head", base_head, latent_head)
 
-    baseline_pred = baseline.infer_image(raw_image, args.input_size)
-    latent_pred = latent.infer_image(raw_image, args.input_size)
-    baseline_pred = torch.from_numpy(baseline_pred) / float(baseline.max_depth)
-    latent_pred = torch.from_numpy(latent_pred) / float(latent.max_depth)
-    tensor_diff("normalized_final_prediction", baseline_pred, latent_pred)
+    baseline_pred = torch.from_numpy(baseline.infer_image(raw_image, args.input_size))
+    latent_pred = torch.from_numpy(latent.infer_image(raw_image, args.input_size))
+    tensor_diff("final_prediction", baseline_pred, latent_pred)
 
 
 if __name__ == "__main__":
