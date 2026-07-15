@@ -19,6 +19,8 @@ LOAD_FROM="${LOAD_FROM:-runs/fixed_${VARIANT}_${RUN_TAG}/best_abs_rel.pth}"
 SAVE_DIR="${SAVE_DIR:-eval/fixed_${VARIANT}_${RUN_TAG}_${SPLIT_NAME}}"
 SAVE_DEPTH="${SAVE_DEPTH:-true}"
 DEPTH_OUTPUT_DIR="${DEPTH_OUTPUT_DIR:-${SAVE_DIR}/depth}"
+DEPTH_COLORMAP="${DEPTH_COLORMAP:-Spectral_r}"
+DEPTH_VIS_SPACE="${DEPTH_VIS_SPACE:-disparity}"
 
 STRUCTURE_ARGS=()
 case "${VARIANT}" in
@@ -47,7 +49,12 @@ esac
 
 OUTPUT_ARGS=()
 if [[ "${SAVE_DEPTH}" == "true" ]]; then
-  OUTPUT_ARGS+=(--save-depth --depth-output-dir "${DEPTH_OUTPUT_DIR}")
+  OUTPUT_ARGS+=(
+    --save-depth
+    --depth-output-dir "${DEPTH_OUTPUT_DIR}"
+    --depth-colormap "${DEPTH_COLORMAP}"
+    --depth-vis-space "${DEPTH_VIS_SPACE}"
+  )
 fi
 
 mkdir -p "${SAVE_DIR}"
