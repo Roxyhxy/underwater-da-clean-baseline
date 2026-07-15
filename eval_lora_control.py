@@ -29,6 +29,9 @@ def main():
     parser.add_argument("--decoder-lora-rank", default=2, type=int)
     parser.add_argument("--decoder-lora-alpha", default=4.0, type=float)
     parser.add_argument("--decoder-lora-target", default="tail", choices=["post_vfe", "refinenet", "tail", "all"])
+    parser.add_argument("--save-raw-disparity", action="store_true")
+    parser.add_argument("--raw-output-dir", default="")
+    parser.add_argument("--raw-colormap", default="Spectral_r")
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -70,7 +73,18 @@ def main():
     pairs = load_file_list(args.val_list)
     logger.info("Loaded AquaDegrade-LoRA checkpoint: %s" % args.load_from)
     logger.info("Validation file list loaded: %d samples" % len(pairs))
-    metrics = evaluate_latent_prior(model, pairs, args.input_size, device, args.max_depth, logger)
+    raw_output_dir = args.raw_output_dir or os.path.join(args.save_dir, "raw_disparity")
+    metrics = evaluate_latent_prior(
+        model,
+        pairs,
+        args.input_size,
+        device,
+        args.max_depth,
+        logger,
+        save_raw=args.save_raw_disparity,
+        raw_output_dir=raw_output_dir,
+        raw_colormap=args.raw_colormap,
+    )
     if metrics is None:
         raise RuntimeError("No valid FLSea samples were evaluated")
 

@@ -9,6 +9,7 @@ import torch
 from depth_anything_v2.dpt import DepthAnythingV2
 from util.metric import eval_depth
 from util.utils import init_log
+from util.visualization import save_raw_disparity
 
 
 MODEL_CONFIGS = {
@@ -74,10 +75,26 @@ def load_file_list(file_list_path):
 
 
 @torch.no_grad()
-def evaluate_legacy(model, file_pairs, input_size, device, max_depth, logger):
+def evaluate_legacy(
+    model,
+    file_pairs,
+    input_size,
+    device,
+    max_depth,
+    logger,
+    save_raw=False,
+    raw_output_dir="",
+    raw_colormap="Spectral_r",
+):
     results = {key: 0.0 for key in ["d1", "d2", "d3", "abs_rel", "sq_rel", "rmse", "rmse_log", "log10", "silog"]}
     nsamples = 0
     metric = Disparity2Depth(depth_cap=max_depth)
+    if save_raw:
+        os.makedirs(raw_output_dir, exist_ok=True)
+        logger.info(
+            "Raw disparity output: dir=%s colormap=%s normalization=per-image-minmax gt_used=False"
+            % (raw_output_dir, raw_colormap)
+        )
 
     for idx, (image_path, depth_path) in enumerate(file_pairs):
         raw_image = cv2.imread(image_path)
@@ -87,6 +104,9 @@ def evaluate_legacy(model, file_pairs, input_size, device, max_depth, logger):
 
         pred = model.infer_image(raw_image, input_size)
         pred_t = torch.tensor(pred, device=device, dtype=torch.float32)
+
+        if save_raw:
+            save_raw_disparity(pred, raw_output_dir, idx, image_path, colormap=raw_colormap)
 
         gt_depth = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
         if gt_depth is None:
@@ -124,6 +144,9 @@ def main():
     parser.add_argument("--input-size", default=518, type=int)
     parser.add_argument("--max-depth", default=40.0, type=float)
     parser.add_argument("--save-dir", required=True)
+    parser.add_argument("--save-raw-disparity", action="store_true")
+    parser.add_argument("--raw-output-dir", default="")
+    parser.add_argument("--raw-colormap", default="Spectral_r")
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -144,7 +167,18 @@ def main():
     file_pairs = load_file_list(args.img_path)
     logger.info("Validation file list loaded: %d samples" % len(file_pairs))
 
-    metrics = evaluate_legacy(model, file_pairs, args.input_size, device, args.max_depth, logger)
+    raw_output_dir = args.raw_output_dir or os.path.join(args.save_dir, "raw_disparity")
+    metrics = evaluate_legacy(
+        model,
+        file_pairs,
+        args.input_size,
+        device,
+        args.max_depth,
+        logger,
+        save_raw=args.save_raw_disparity,
+        raw_output_dir=raw_output_dir,
+        raw_colormap=args.raw_colormap,
+    )
     if metrics is None:
         logger.info("No valid samples for evaluation.")
         return

@@ -68,6 +68,22 @@ Use these two scripts as the only primary evaluation entrypoints:
 
 For research-one experiments, compare every model against `eval_flsea_baseline_legacy.sh`, then report the matching latent-prior result from `eval_flsea_latent_prior.sh`.
 
+### Unified raw-disparity visualization
+
+Every `eval_flsea_*.sh` entry now uses the same visualization protocol for the
+baseline, latent-prior variants, capacity controls, consistency model, and LoRA:
+
+- save the dense raw output returned by `model.infer_image()`
+- never use GT alignment, inverse-depth conversion, depth caps, or GT masks
+- normalize each raw disparity map with its own finite min/max
+- apply the `Spectral_r` colormap: near/high disparity is red and far/low disparity is purple
+- save `*_raw_disp.npy` and `*_raw_disp.png` under `<save-dir>/raw_disparity`
+
+The PNG is intended for relative geometric-shape comparison. The NPY retains the
+actual model output and must be used when numerical output differences matter.
+Metric computation remains unchanged and still uses disparity scale-shift
+alignment against valid FLSea GT pixels.
+
 ## Server Run
 
 The training script is now server-oriented and expects explicit dataset and checkpoint paths.

@@ -26,8 +26,9 @@ PRIOR_FFT_SIZE=64
 PRIOR_STAT_HIDDEN=64
 DEG_MAP_SCALE=0.2
 
-SAVE_DEPTH="false"
-DEPTH_OUTPUT_DIR="eval/flsea_latent_prior_eval/depth"
+SAVE_RAW_DISPARITY="true"
+RAW_OUTPUT_DIR="eval/flsea_latent_prior_eval/raw_disparity"
+RAW_COLORMAP="Spectral_r"
 
 EXTRA_ARGS=("$@")
 
@@ -64,11 +65,8 @@ CMD=(
   --save-dir "${SAVE_DIR}"
 )
 
-if [[ "${SAVE_DEPTH}" == "true" ]]; then
-  CMD+=(--save-depth)
-fi
-if [[ -n "${DEPTH_OUTPUT_DIR}" ]]; then
-  CMD+=(--depth-output-dir "${DEPTH_OUTPUT_DIR}")
+if [[ "${SAVE_RAW_DISPARITY}" == "true" ]]; then
+  CMD+=(--save-raw-disparity --raw-output-dir "${RAW_OUTPUT_DIR}" --raw-colormap "${RAW_COLORMAP}")
 fi
 
 CMD+=("${EXTRA_ARGS[@]}")

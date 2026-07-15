@@ -15,6 +15,8 @@ PYTHON_BIN="python"
 CKPT="/data1/hxy/Depth-Anything-V2/checkpoints/depth_anything_v2_vits.pth"
 VAL_LIST="/data1/hxy/Depth-Anything-V2/DA_0/dataset/splits/flsea/test.txt"
 SAVE_DIR="eval/flsea_baseline_legacy"
+RAW_OUTPUT_DIR="${RAW_OUTPUT_DIR:-${SAVE_DIR}/raw_disparity}"
+RAW_COLORMAP="${RAW_COLORMAP:-Spectral_r}"
 
 ENCODER="vits"
 INPUT_SIZE=518
@@ -42,6 +44,9 @@ CMD=(
   --input-size "${INPUT_SIZE}"
   --max-depth "${MAX_DEPTH}"
   --save-dir "${SAVE_DIR}"
+  --save-raw-disparity
+  --raw-output-dir "${RAW_OUTPUT_DIR}"
+  --raw-colormap "${RAW_COLORMAP}"
 )
 
 CMD+=("${EXTRA_ARGS[@]}")

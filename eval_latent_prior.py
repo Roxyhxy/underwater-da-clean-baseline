@@ -1,8 +1,6 @@
 import argparse
 import logging
 import os
-from pathlib import Path
-
 import cv2
 import numpy as np
 import torch
@@ -11,6 +9,7 @@ from models.depth_anything_latent_prior import DepthAnythingLatentPrior
 from train import MODEL_CONFIGS
 from util.metric import eval_depth
 from util.utils import init_log
+from util.visualization import save_raw_disparity
 
 
 METRIC_KEYS = ["d1", "d2", "d3", "abs_rel", "sq_rel", "rmse", "rmse_log", "log10", "silog"]
@@ -68,40 +67,6 @@ def load_file_list(file_list_path):
                 raise ValueError("Each line must contain image_path and depth_path")
             pairs.append((parts[0], parts[1]))
     return pairs
-
-
-def colorize_depth(depth, colormap="Spectral_r", vis_space="disparity"):
-    depth = depth.astype(np.float32)
-    valid = np.isfinite(depth) & (depth > 0)
-    colored = np.zeros((*depth.shape, 3), dtype=np.uint8)
-    if valid.sum() < 8:
-        return colored
-
-    visual_values = np.zeros_like(depth)
-    if vis_space == "disparity":
-        visual_values[valid] = 1.0 / np.maximum(depth[valid], 1e-6)
-    elif vis_space == "depth":
-        visual_values[valid] = depth[valid]
-    else:
-        raise ValueError("vis_space must be 'depth' or 'disparity'")
-
-    values = visual_values[valid]
-    low = np.percentile(values, 5)
-    high = np.percentile(values, 95)
-    if high <= low:
-        high = low + 1e-6
-
-    norm = np.clip((visual_values - low) / (high - low), 0.0, 1.0)
-    try:
-        import matplotlib
-    except ImportError as exc:
-        raise ImportError("Saving Spectral depth maps requires matplotlib") from exc
-
-    cmap = matplotlib.colormaps.get_cmap(colormap)
-    colored_rgb = (cmap(norm)[..., :3] * 255.0).round().astype(np.uint8)
-    colored = colored_rgb[..., ::-1].copy()
-    colored[~valid] = 0
-    return colored
 
 
 def load_model(args, device, logger):
@@ -164,17 +129,20 @@ def evaluate_latent_prior(
     device,
     max_depth,
     logger,
-    save_depth=False,
-    depth_output_dir="",
-    depth_colormap="Spectral_r",
-    depth_vis_space="disparity",
+    save_raw=False,
+    raw_output_dir="",
+    raw_colormap="Spectral_r",
 ):
     results = {key: 0.0 for key in METRIC_KEYS}
     nsamples = 0
     metric = Disparity2Depth(depth_cap=max_depth)
 
-    if save_depth:
-        os.makedirs(depth_output_dir, exist_ok=True)
+    if save_raw:
+        os.makedirs(raw_output_dir, exist_ok=True)
+        logger.info(
+            "Raw disparity output: dir=%s colormap=%s normalization=per-image-minmax gt_used=False"
+            % (raw_output_dir, raw_colormap)
+        )
 
     for idx, (image_path, depth_path) in enumerate(file_pairs):
         raw_image = cv2.imread(image_path)
@@ -184,6 +152,9 @@ def evaluate_latent_prior(
 
         pred = model.infer_image(raw_image, input_size)
         pred_t = torch.tensor(pred, device=device, dtype=torch.float32)
+
+        if save_raw:
+            save_raw_disparity(pred, raw_output_dir, idx, image_path, colormap=raw_colormap)
 
         gt_depth = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
         if gt_depth is None:
@@ -221,17 +192,6 @@ def evaluate_latent_prior(
         for key in METRIC_KEYS:
             results[key] += cur_results[key]
         nsamples += 1
-
-        if save_depth:
-            stem = Path(image_path).stem
-            pred_np = prediction.detach().cpu().numpy().astype(np.float32)
-            np.save(os.path.join(depth_output_dir, f"{idx:04d}_{stem}_pred.npy"), pred_np)
-            colored = colorize_depth(
-                pred_np,
-                colormap=depth_colormap,
-                vis_space=depth_vis_space,
-            )
-            cv2.imwrite(os.path.join(depth_output_dir, f"{idx:04d}_{stem}_pred.png"), colored)
 
         if (idx + 1) % 50 == 0:
             logger.info("Processed %d / %d samples" % (idx + 1, len(file_pairs)))
@@ -271,10 +231,9 @@ def main():
     parser.add_argument("--plain-adapter", action="store_true")
     parser.add_argument("--adapter-hidden", default=256, type=int)
     parser.add_argument("--save-dir", required=True)
-    parser.add_argument("--save-depth", action="store_true")
-    parser.add_argument("--depth-output-dir", default="")
-    parser.add_argument("--depth-colormap", default="Spectral_r")
-    parser.add_argument("--depth-vis-space", default="disparity", choices=["depth", "disparity"])
+    parser.add_argument("--save-raw-disparity", action="store_true")
+    parser.add_argument("--raw-output-dir", default="")
+    parser.add_argument("--raw-colormap", default="Spectral_r")
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -286,7 +245,7 @@ def main():
     file_pairs = load_file_list(args.val_list)
     logger.info("Validation file list loaded: %d samples" % len(file_pairs))
 
-    depth_output_dir = args.depth_output_dir or os.path.join(args.save_dir, "depth_predictions")
+    raw_output_dir = args.raw_output_dir or os.path.join(args.save_dir, "raw_disparity")
     metrics = evaluate_latent_prior(
         model,
         file_pairs,
@@ -294,10 +253,9 @@ def main():
         device,
         args.max_depth,
         logger,
-        save_depth=args.save_depth,
-        depth_output_dir=depth_output_dir,
-        depth_colormap=args.depth_colormap,
-        depth_vis_space=args.depth_vis_space,
+        save_raw=args.save_raw_disparity,
+        raw_output_dir=raw_output_dir,
+        raw_colormap=args.raw_colormap,
     )
     if metrics is None:
         logger.info("No valid samples for evaluation.")

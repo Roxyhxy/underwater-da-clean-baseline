@@ -17,10 +17,9 @@ SPLIT_NAME="${SPLIT_NAME:-test}"
 SPLIT_LIST="${SPLIT_LIST:-/data1/hxy/Depth-Anything-V2/DA_0/dataset/splits/flsea/test.txt}"
 LOAD_FROM="${LOAD_FROM:-runs/fixed_${VARIANT}_${RUN_TAG}/best_abs_rel.pth}"
 SAVE_DIR="${SAVE_DIR:-eval/fixed_${VARIANT}_${RUN_TAG}_${SPLIT_NAME}}"
-SAVE_DEPTH="${SAVE_DEPTH:-true}"
-DEPTH_OUTPUT_DIR="${DEPTH_OUTPUT_DIR:-${SAVE_DIR}/depth}"
-DEPTH_COLORMAP="${DEPTH_COLORMAP:-Spectral_r}"
-DEPTH_VIS_SPACE="${DEPTH_VIS_SPACE:-disparity}"
+SAVE_RAW_DISPARITY="${SAVE_RAW_DISPARITY:-true}"
+RAW_OUTPUT_DIR="${RAW_OUTPUT_DIR:-${SAVE_DIR}/raw_disparity}"
+RAW_COLORMAP="${RAW_COLORMAP:-Spectral_r}"
 
 STRUCTURE_ARGS=()
 case "${VARIANT}" in
@@ -47,13 +46,12 @@ case "${VARIANT}" in
     ;;
 esac
 
-OUTPUT_ARGS=()
-if [[ "${SAVE_DEPTH}" == "true" ]]; then
-  OUTPUT_ARGS+=(
-    --save-depth
-    --depth-output-dir "${DEPTH_OUTPUT_DIR}"
-    --depth-colormap "${DEPTH_COLORMAP}"
-    --depth-vis-space "${DEPTH_VIS_SPACE}"
+VIS_ARGS=()
+if [[ "${SAVE_RAW_DISPARITY}" == "true" ]]; then
+  VIS_ARGS+=(
+    --save-raw-disparity
+    --raw-output-dir "${RAW_OUTPUT_DIR}"
+    --raw-colormap "${RAW_COLORMAP}"
   )
 fi
 
@@ -67,5 +65,5 @@ python eval_latent_prior.py \
   --prior-fft-size 64 --prior-stat-hidden 64 --deg-map-scale 0.2 \
   --save-dir "${SAVE_DIR}" \
   "${STRUCTURE_ARGS[@]}" \
-  "${OUTPUT_ARGS[@]}" \
+  "${VIS_ARGS[@]}" \
   "${EXTRA_ARGS[@]}"
