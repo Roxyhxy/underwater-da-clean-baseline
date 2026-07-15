@@ -112,6 +112,7 @@ def load_model(args, device, logger):
         use_local_prior=not args.disable_local_prior,
         use_fft_prior=not args.disable_fft_prior,
         use_deg_map=not args.disable_deg_map,
+        deg_map_spatial_mean=args.deg_map_spatial_mean,
         use_plain_adapter=args.plain_adapter,
         adapter_hidden=args.adapter_hidden,
     ).to(device)
@@ -227,7 +228,16 @@ def main():
     parser.add_argument("--disable-global-prior", action="store_true")
     parser.add_argument("--disable-local-prior", action="store_true")
     parser.add_argument("--disable-fft-prior", action="store_true")
-    parser.add_argument("--disable-deg-map", action="store_true")
+    parser.add_argument(
+        "--disable-deg-map",
+        action="store_true",
+        help="Use learned scalar gates instead of spatial degradation maps",
+    )
+    parser.add_argument(
+        "--deg-map-spatial-mean",
+        action="store_true",
+        help="Use each generated map's per-image spatial mean",
+    )
     parser.add_argument("--plain-adapter", action="store_true")
     parser.add_argument("--adapter-hidden", default=256, type=int)
     parser.add_argument("--save-dir", required=True)

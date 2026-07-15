@@ -117,7 +117,11 @@ Recommended first-round research-one rule:
 - compare only against `scripts/eval_flsea_baseline_legacy.sh`
 - use `scripts/eval_flsea_latent_prior.sh` for the final latent-prior number under the same FLSea protocol
 
-### Core structure ablation
+### Legacy first-round structure ablation
+
+These commands document the completed first round. Do not rerun `global_only`,
+`full`, `no_fft`, or `no_deg_map` for final reporting: their controls were later
+found invalid and are superseded by the fixed second-round scripts below.
 
 The core latent-prior ablation keeps the backbone, original DPT head, loss, data split, and optimizer settings fixed. Only the enabled prior structure changes:
 
@@ -125,7 +129,6 @@ The core latent-prior ablation keeps the backbone, original DPT head, loss, data
 bash scripts/train_flsea_latent_prior_ablation.sh global_only
 bash scripts/train_flsea_latent_prior_ablation.sh local_only
 bash scripts/train_flsea_latent_prior_ablation.sh no_fft
-bash scripts/train_flsea_latent_prior_ablation.sh no_deg_map
 bash scripts/train_flsea_latent_prior_ablation.sh full
 ```
 
@@ -135,7 +138,6 @@ Each run uses five epochs and writes to `runs/ablation_<variant>`. Evaluate the 
 bash scripts/eval_flsea_latent_prior_ablation.sh global_only
 bash scripts/eval_flsea_latent_prior_ablation.sh local_only
 bash scripts/eval_flsea_latent_prior_ablation.sh no_fft
-bash scripts/eval_flsea_latent_prior_ablation.sh no_deg_map
 bash scripts/eval_flsea_latent_prior_ablation.sh full
 ```
 
@@ -153,7 +155,7 @@ relative-depth loss, FP32, seed 42, and legacy disparity scale-shift evaluation.
 | A1 Global only | `bash scripts/train_flsea_latent_prior_ablation.sh global_only` | global latent branch | global degradation descriptor |
 | A2 Local only | `bash scripts/train_flsea_latent_prior_ablation.sh local_only` | local prior and deg-map branch | spatial degradation prior |
 | A3 No FFT | `bash scripts/train_flsea_latent_prior_ablation.sh no_fft` | full prior except FFT branch | frequency prior contribution |
-| A4 No deg map | `bash scripts/train_flsea_latent_prior_ablation.sh no_deg_map` | full prior except map generator | explicit spatial map contribution |
+| A4 No deg map (invalid first-round control) | `bash scripts/train_flsea_latent_prior_ablation.sh no_deg_map` | constant-one gate | superseded by scalar and spatial-mean controls |
 | A5 Full | `bash scripts/train_flsea_latent_prior_ablation.sh full` | latent encoder and prior injection | proposed core model |
 | L1 Full + consistency | `bash scripts/train_flsea_latent_prior_consistency.sh` | same as A5 | loss contribution after structure is fixed |
 | L2 Full + decoder | `bash scripts/train_flsea_capacity_control.sh full_decoder` | A5 plus original decoder | capacity upper bound, not the fair core comparison |
@@ -166,7 +168,6 @@ bash scripts/train_flsea_capacity_control.sh conv_adapter
 bash scripts/train_flsea_latent_prior_ablation.sh global_only
 bash scripts/train_flsea_latent_prior_ablation.sh local_only
 bash scripts/train_flsea_latent_prior_ablation.sh no_fft
-bash scripts/train_flsea_latent_prior_ablation.sh no_deg_map
 bash scripts/train_flsea_latent_prior_ablation.sh full
 ```
 
@@ -183,6 +184,42 @@ Test-set evaluation uses the matching `eval_flsea_*` scripts. Each script loads
 For B3, use `bash scripts/eval_flsea_aquadegrade_lora_control.sh`; it deliberately
 replaces the old loader-based validation with the same original-resolution legacy
 alignment protocol used by every other row.
+
+### Fixed second-round ablation
+
+The first round exposed two invalid controls: the global FiLM MLP had all Linear
+weights initialized to zero, and `no_deg_map` used a constant-one gate with a
+larger effective injection magnitude. Both are fixed in the current model.
+
+Run the corrected single-seed diagnostic matrix without overwriting old results:
+
+```bash
+bash scripts/train_flsea_fixed_ablation.sh global_only
+bash scripts/train_flsea_fixed_ablation.sh full
+bash scripts/train_flsea_fixed_ablation.sh no_fft
+bash scripts/train_flsea_fixed_ablation.sh local_scalar
+bash scripts/train_flsea_fixed_ablation.sh local_spatial_mean
+bash scripts/train_flsea_fixed_ablation.sh local_consistency
+```
+
+`local_scalar` learns one scalar gate per scale, initialized to `0.5`.
+`local_spatial_mean` retains the generated map's exact per-image, per-scale mean
+but removes all spatial variation. Compare both against `local_only` to isolate
+the value of explicit spatial degradation localization.
+
+After selecting the structure using validation only, run three seeds:
+
+```bash
+for seed in 42 123 3407; do
+  SEED=${seed} bash scripts/train_flsea_fixed_ablation.sh local_only
+done
+```
+
+Matching evaluation example:
+
+```bash
+SEED=42 bash scripts/eval_flsea_fixed_ablation.sh local_only
+```
 
 Optional overrides:
 

@@ -58,7 +58,7 @@ def summarize_trainable_parameters(model):
             summary["plain_adapter"].append((name, param))
         elif name.startswith("depth_head.global_mod.") or name.startswith("depth_head.deg_map_generator.") or name.startswith(
             "depth_head.prior_to_feat."
-        ):
+        ) or name == "depth_head.scalar_gate_logits":
             summary["prior_head"].append((name, param))
         elif name.startswith("depth_head."):
             summary["base_head"].append((name, param))
@@ -121,7 +121,16 @@ def main():
     parser.add_argument("--disable-global-prior", action="store_true")
     parser.add_argument("--disable-local-prior", action="store_true")
     parser.add_argument("--disable-fft-prior", action="store_true")
-    parser.add_argument("--disable-deg-map", action="store_true")
+    parser.add_argument(
+        "--disable-deg-map",
+        action="store_true",
+        help="Replace spatial degradation maps with four learned scalar gates",
+    )
+    parser.add_argument(
+        "--deg-map-spatial-mean",
+        action="store_true",
+        help="Replace each generated map by its per-image spatial mean",
+    )
     parser.add_argument("--plain-adapter", action="store_true")
     parser.add_argument("--adapter-hidden", default=256, type=int)
     parser.add_argument("--freeze-backbone", action="store_true")
@@ -196,6 +205,7 @@ def main():
         use_local_prior=not args.disable_local_prior,
         use_fft_prior=not args.disable_fft_prior,
         use_deg_map=not args.disable_deg_map,
+        deg_map_spatial_mean=args.deg_map_spatial_mean,
         use_plain_adapter=args.plain_adapter,
         adapter_hidden=args.adapter_hidden,
     ).to(device)
@@ -221,12 +231,13 @@ def main():
         train_latent_prior=not args.freeze_latent_prior,
     )
     logger.info(
-        "Prior structure: global=%s local=%s fft=%s deg_map=%s plain_adapter=%s"
+        "Prior structure: global=%s local=%s fft=%s deg_map=%s spatial_mean=%s plain_adapter=%s"
         % (
             str(not args.disable_global_prior),
             str(not args.disable_local_prior),
             str(not args.disable_fft_prior),
             str(not args.disable_deg_map),
+            str(args.deg_map_spatial_mean),
             str(args.plain_adapter),
         )
     )
@@ -381,6 +392,13 @@ def main():
 
         mean_train_loss = running_loss / max(len(train_loader), 1)
         logger.info("Epoch %02d finished | mean_train_loss=%.6f" % (epoch + 1, mean_train_loss))
+        if model.use_global_prior:
+            global_mod = model.depth_head.global_mod
+            condition_norm = global_mod.to_gamma[2].weight.norm() + global_mod.to_beta[2].weight.norm()
+            logger.info("Global conditional weight norm: %.6f" % condition_norm.item())
+        if model.depth_head.scalar_gate_logits is not None:
+            gates = torch.sigmoid(model.depth_head.scalar_gate_logits).detach().cpu().tolist()
+            logger.info("Learned scalar gates: %s" % ", ".join(f"{gate:.4f}" for gate in gates))
         model.eval()
         metrics = evaluate_latent_prior(
             model,

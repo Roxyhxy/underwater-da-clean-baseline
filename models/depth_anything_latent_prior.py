@@ -42,10 +42,13 @@ class GlobalDegradationModulation(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
-        for module in list(self.to_gamma.modules()) + list(self.to_beta.modules()):
-            if isinstance(module, nn.Linear):
-                nn.init.zeros_(module.weight)
-                nn.init.zeros_(module.bias)
+        # Keep the residual branch at zero initially, but retain a live path
+        # from z_deg to the zero-initialized output layer.
+        for branch in (self.to_gamma, self.to_beta):
+            nn.init.xavier_uniform_(branch[0].weight)
+            nn.init.zeros_(branch[0].bias)
+            nn.init.zeros_(branch[2].weight)
+            nn.init.zeros_(branch[2].bias)
 
     def forward(self, feat, z_deg):
         gamma = self.to_gamma(z_deg).unsqueeze(-1).unsqueeze(-1)
@@ -89,6 +92,7 @@ class LatentPriorDPTHead(nn.Module):
         use_global_prior=True,
         use_local_prior=True,
         use_deg_map=True,
+        deg_map_spatial_mean=False,
         use_plain_adapter=False,
         adapter_hidden=256,
     ):
@@ -98,7 +102,10 @@ class LatentPriorDPTHead(nn.Module):
         self.use_global_prior = bool(use_global_prior)
         self.use_local_prior = bool(use_local_prior)
         self.use_deg_map = bool(use_deg_map)
+        self.deg_map_spatial_mean = bool(deg_map_spatial_mean)
         self.use_plain_adapter = bool(use_plain_adapter)
+        if self.deg_map_spatial_mean and not self.use_deg_map:
+            raise ValueError("deg_map_spatial_mean requires use_deg_map=True")
 
         self.projects = nn.ModuleList(
             [
@@ -179,6 +186,10 @@ class LatentPriorDPTHead(nn.Module):
         self.prior_to_feat = nn.ModuleList(
             [nn.Conv2d(ch, features, kernel_size=1, bias=False) for ch in prior_channels]
         )
+        if self.use_local_prior and not self.use_deg_map:
+            self.scalar_gate_logits = nn.Parameter(torch.zeros(4))
+        else:
+            self.register_parameter("scalar_gate_logits", None)
         self.plain_adapters = nn.ModuleList(
             [PlainResidualConvAdapter(features, adapter_hidden) for _ in range(4)]
         ) if self.use_plain_adapter else nn.ModuleList()
@@ -225,8 +236,18 @@ class LatentPriorDPTHead(nn.Module):
         if self.use_local_prior:
             if self.use_deg_map:
                 deg_maps = self.deg_map_generator(layer_feats, prior_pyramid)
+                if self.deg_map_spatial_mean:
+                    deg_maps = [
+                        deg_map.mean(dim=(-2, -1), keepdim=True).expand_as(deg_map)
+                        for deg_map in deg_maps
+                    ]
             else:
-                deg_maps = [feat.new_ones(feat.shape[0], 1, *feat.shape[-2:]) for feat in layer_feats]
+                deg_maps = [
+                    torch.sigmoid(self.scalar_gate_logits[index]).to(dtype=feat.dtype)
+                    .view(1, 1, 1, 1)
+                    .expand(feat.shape[0], 1, *feat.shape[-2:])
+                    for index, feat in enumerate(layer_feats)
+                ]
             injected = []
             for index, (feat, prior, deg_map) in enumerate(zip(layer_feats, prior_pyramid, deg_maps)):
                 self._deg_index = index
@@ -292,6 +313,7 @@ class DepthAnythingLatentPrior(nn.Module):
         use_local_prior=True,
         use_fft_prior=True,
         use_deg_map=True,
+        deg_map_spatial_mean=False,
         use_plain_adapter=False,
         adapter_hidden=256,
     ):
@@ -308,6 +330,7 @@ class DepthAnythingLatentPrior(nn.Module):
         self.use_local_prior = bool(use_local_prior)
         self.use_fft_prior = bool(use_fft_prior)
         self.use_deg_map = bool(use_deg_map)
+        self.deg_map_spatial_mean = bool(deg_map_spatial_mean)
         self.use_plain_adapter = bool(use_plain_adapter)
         self.latent_dim = int(latent_dim)
         self.pretrained = DINOv2(model_name=encoder)
@@ -332,6 +355,7 @@ class DepthAnythingLatentPrior(nn.Module):
             use_global_prior=self.use_global_prior,
             use_local_prior=self.use_local_prior,
             use_deg_map=self.use_deg_map,
+            deg_map_spatial_mean=self.deg_map_spatial_mean,
             use_plain_adapter=self.use_plain_adapter,
             adapter_hidden=adapter_hidden,
         )
@@ -344,6 +368,7 @@ class DepthAnythingLatentPrior(nn.Module):
             "depth_head.global_mod.",
             "depth_head.deg_map_generator.",
             "depth_head.prior_to_feat.",
+            "depth_head.scalar_gate_logits",
             "depth_head.plain_adapters.",
         )
         for key, value in state_dict.items():
@@ -380,6 +405,7 @@ class DepthAnythingLatentPrior(nn.Module):
             "global_mod.",
             "deg_map_generator.",
             "prior_to_feat.",
+            "scalar_gate_logits",
             "plain_adapters.",
         )
         for name, param in self.depth_head.named_parameters():
