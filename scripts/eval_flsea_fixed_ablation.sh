@@ -17,6 +17,8 @@ SPLIT_NAME="${SPLIT_NAME:-test}"
 SPLIT_LIST="${SPLIT_LIST:-/data1/hxy/Depth-Anything-V2/DA_0/dataset/splits/flsea/test.txt}"
 LOAD_FROM="${LOAD_FROM:-runs/fixed_${VARIANT}_${RUN_TAG}/best_abs_rel.pth}"
 SAVE_DIR="${SAVE_DIR:-eval/fixed_${VARIANT}_${RUN_TAG}_${SPLIT_NAME}}"
+SAVE_DEPTH="${SAVE_DEPTH:-true}"
+DEPTH_OUTPUT_DIR="${DEPTH_OUTPUT_DIR:-${SAVE_DIR}/depth}"
 
 STRUCTURE_ARGS=()
 case "${VARIANT}" in
@@ -43,6 +45,11 @@ case "${VARIANT}" in
     ;;
 esac
 
+OUTPUT_ARGS=()
+if [[ "${SAVE_DEPTH}" == "true" ]]; then
+  OUTPUT_ARGS+=(--save-depth --depth-output-dir "${DEPTH_OUTPUT_DIR}")
+fi
+
 mkdir -p "${SAVE_DIR}"
 set -x
 python eval_latent_prior.py \
@@ -53,4 +60,5 @@ python eval_latent_prior.py \
   --prior-fft-size 64 --prior-stat-hidden 64 --deg-map-scale 0.2 \
   --save-dir "${SAVE_DIR}" \
   "${STRUCTURE_ARGS[@]}" \
+  "${OUTPUT_ARGS[@]}" \
   "${EXTRA_ARGS[@]}"
