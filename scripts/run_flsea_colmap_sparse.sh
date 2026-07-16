@@ -76,7 +76,7 @@ fi
 echo "Produced ${#models[@]} sparse model(s)."
 for model in "${models[@]}"; do
   echo "===== Model: ${model} ====="
-  "${COLMAP_BIN}" model_analyzer --path "${model}"
+  "${COLMAP_BIN}" model_analyzer --path "${model}" 2>&1
 done | tee "${SPARSE_DIR}/model_analysis.log"
 
 for model in "${models[@]}"; do
