@@ -51,9 +51,10 @@ class GlobalDegradationModulation(nn.Module):
             nn.init.zeros_(branch[2].bias)
 
     def forward(self, feat, z_deg):
-        gamma = self.to_gamma(z_deg).unsqueeze(-1).unsqueeze(-1)
-        beta = self.to_beta(z_deg).unsqueeze(-1).unsqueeze(-1)
-        scale = torch.sigmoid(self.scale)
+        gamma = torch.tanh(self.to_gamma(z_deg)).unsqueeze(-1).unsqueeze(-1)
+        beta = torch.tanh(self.to_beta(z_deg)).unsqueeze(-1).unsqueeze(-1)
+        # Bound global conditioning to a small residual correction.
+        scale = 0.1 * torch.sigmoid(self.scale)
         return feat * (1.0 + scale * gamma) + scale * beta
 
 
@@ -91,6 +92,7 @@ class LatentPriorDPTHead(nn.Module):
         deg_map_scale=0.2,
         use_global_prior=True,
         use_local_prior=True,
+        use_spectral_map=True,
         use_deg_map=True,
         deg_map_spatial_mean=False,
         use_plain_adapter=False,
@@ -101,6 +103,7 @@ class LatentPriorDPTHead(nn.Module):
         self.deg_map_scale = float(deg_map_scale)
         self.use_global_prior = bool(use_global_prior)
         self.use_local_prior = bool(use_local_prior)
+        self.use_spectral_map = bool(use_spectral_map)
         self.use_deg_map = bool(use_deg_map)
         self.deg_map_spatial_mean = bool(deg_map_spatial_mean)
         self.use_plain_adapter = bool(use_plain_adapter)
@@ -182,6 +185,7 @@ class LatentPriorDPTHead(nn.Module):
             prior_channels=list(prior_channels),
             hidden_channels=[max(32, features // 2)] * 4,
             out_ch=1,
+            use_spectral=self.use_spectral_map,
         )
         self.prior_to_feat = nn.ModuleList(
             [nn.Conv2d(ch, features, kernel_size=1, bias=False) for ch in prior_channels]
@@ -204,10 +208,36 @@ class LatentPriorDPTHead(nn.Module):
     def _inject_deg_prior(self, feat, prior, deg_map):
         if prior.shape[-2:] != feat.shape[-2:]:
             prior = F.interpolate(prior, size=feat.shape[-2:], mode="bilinear", align_corners=False)
-        correction = self.prior_to_feat[self._deg_index](prior)
+        correction = torch.tanh(self.prior_to_feat[self._deg_index](prior))
         return feat + self.deg_map_scale * correction * deg_map
 
-    def forward(self, out_features, patch_h, patch_w, z_deg, prior_pyramid, return_aux=False):
+    def _decode(self, layer_feats, patch_h, patch_w):
+        layer_1_rn, layer_2_rn, layer_3_rn, layer_4_rn = layer_feats
+        path_4 = self.scratch.refinenet4(layer_4_rn, size=layer_3_rn.shape[2:])
+        path_3 = self.scratch.refinenet3(path_4, layer_3_rn, size=layer_2_rn.shape[2:])
+        path_2 = self.scratch.refinenet2(path_3, layer_2_rn, size=layer_1_rn.shape[2:])
+        path_1 = self.scratch.refinenet1(path_2, layer_1_rn)
+
+        out = self.scratch.output_conv1(path_1)
+        out = F.interpolate(
+            out,
+            (int(patch_h * 14), int(patch_w * 14)),
+            mode="bilinear",
+            align_corners=True,
+        )
+        out = self.scratch.output_conv2(out)
+        return out, (path_4, path_3, path_2, path_1)
+
+    def forward(
+        self,
+        out_features,
+        patch_h,
+        patch_w,
+        z_deg,
+        prior_pyramid,
+        return_aux=False,
+        return_base=False,
+    ):
         out = []
         for i, x in enumerate(out_features):
             if self.use_clstoken:
@@ -228,7 +258,13 @@ class LatentPriorDPTHead(nn.Module):
         layer_3_rn = self.scratch.layer3_rn(layer_3)
         layer_4_rn = self.scratch.layer4_rn(layer_4)
 
-        layer_feats = [layer_1_rn, layer_2_rn, layer_3_rn, layer_4_rn]
+        base_layer_feats = [layer_1_rn, layer_2_rn, layer_3_rn, layer_4_rn]
+        base_out = None
+        if return_base:
+            with torch.no_grad():
+                base_out, _ = self._decode(base_layer_feats, patch_h, patch_w)
+
+        layer_feats = base_layer_feats
         if self.use_plain_adapter:
             layer_feats = [adapter(feat) for adapter, feat in zip(self.plain_adapters, layer_feats)]
             layer_1_rn, layer_2_rn, layer_3_rn, layer_4_rn = layer_feats
@@ -259,22 +295,13 @@ class LatentPriorDPTHead(nn.Module):
         if self.use_global_prior:
             layer_4_rn = self.global_mod(layer_4_rn, z_deg)
 
-        path_4 = self.scratch.refinenet4(layer_4_rn, size=layer_3_rn.shape[2:])
-        path_3 = self.scratch.refinenet3(path_4, layer_3_rn, size=layer_2_rn.shape[2:])
-        path_2 = self.scratch.refinenet2(path_3, layer_2_rn, size=layer_1_rn.shape[2:])
-        path_1 = self.scratch.refinenet1(path_2, layer_1_rn)
-
-        out = self.scratch.output_conv1(path_1)
-        out = F.interpolate(
-            out,
-            (int(patch_h * 14), int(patch_w * 14)),
-            mode="bilinear",
-            align_corners=True,
+        out, paths = self._decode(
+            [layer_1_rn, layer_2_rn, layer_3_rn, layer_4_rn], patch_h, patch_w
         )
-        out = self.scratch.output_conv2(out)
+        path_4, path_3, path_2, path_1 = paths
 
         if not return_aux:
-            return out
+            return (out, base_out) if return_base else out
 
         aux = {
             "z_deg": z_deg,
@@ -291,6 +318,8 @@ class LatentPriorDPTHead(nn.Module):
                 "path_1": path_1,
             },
         }
+        if return_base:
+            aux["base_prediction"] = base_out
         return out, aux
 
 
@@ -354,6 +383,7 @@ class DepthAnythingLatentPrior(nn.Module):
             deg_map_scale=deg_map_scale,
             use_global_prior=self.use_global_prior,
             use_local_prior=self.use_local_prior,
+            use_spectral_map=self.use_fft_prior,
             use_deg_map=self.use_deg_map,
             deg_map_spatial_mean=self.deg_map_spatial_mean,
             use_plain_adapter=self.use_plain_adapter,
@@ -473,7 +503,7 @@ class DepthAnythingLatentPrior(nn.Module):
             self.freeze_latent_prior_encoder()
         self.freeze_disabled_prior_components()
 
-    def forward(self, image, return_aux=False):
+    def forward(self, image, return_aux=False, return_base=False):
         patch_h, patch_w = image.shape[-2] // 14, image.shape[-1] // 14
         out_features = self.pretrained.get_intermediate_layers(
             image, self.intermediate_layer_idx[self.encoder], return_class_token=True
@@ -490,10 +520,14 @@ class DepthAnythingLatentPrior(nn.Module):
             z_deg,
             prior_pyramid,
             return_aux=return_aux,
+            return_base=return_base,
         )
         if return_aux:
             pred, aux = depth
             return pred.squeeze(1), aux
+        if return_base:
+            pred, base_pred = depth
+            return pred.squeeze(1), base_pred.squeeze(1)
         return depth.squeeze(1)
 
     @torch.no_grad()

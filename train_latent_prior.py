@@ -4,6 +4,7 @@ import os
 import pprint
 import random
 
+import numpy as np
 import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
@@ -39,6 +40,26 @@ def save_checkpoint(model, path, args, epoch=None, metrics=None):
 
 def _count_params(params):
     return sum(param.numel() for param in params)
+
+
+def seed_data_worker(worker_id):
+    """Keep NumPy/Python transforms reproducible inside each loader worker."""
+    worker_seed = torch.initial_seed() % (2**32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def raw_disparity_gauge_loss(prediction, reference, eps=1e-6):
+    """Keep the relative-disparity gauge near DA2 without copying its pixels."""
+    reference = reference.detach()
+    pred_mean = prediction.mean(dim=(-2, -1))
+    ref_mean = reference.mean(dim=(-2, -1))
+    pred_std = prediction.std(dim=(-2, -1), unbiased=False)
+    ref_std = reference.std(dim=(-2, -1), unbiased=False)
+    normalizer = ref_std.clamp_min(eps)
+    mean_loss = (pred_mean - ref_mean).abs() / normalizer
+    std_loss = (pred_std - ref_std).abs() / normalizer
+    return (mean_loss + std_loss).mean()
 
 
 def summarize_trainable_parameters(model):
@@ -141,6 +162,12 @@ def main():
     parser.add_argument("--silog-weight", default=0.5, type=float)
     parser.add_argument("--metric-weight", default=1.0, type=float)
     parser.add_argument("--grad-weight", default=0.05, type=float)
+    parser.add_argument(
+        "--gauge-anchor-weight",
+        default=0.0,
+        type=float,
+        help="Anchor raw disparity mean/std to frozen DA2 output; 0 disables it",
+    )
     parser.add_argument("--consistency-hardness-weight", default=0.0, type=float)
     parser.add_argument("--consistency-hardness-clamp-min", default=0.90, type=float)
     parser.add_argument("--consistency-hardness-clamp-max", default=1.10, type=float)
@@ -167,6 +194,10 @@ def main():
     logger.propagate = 0
     logger.info(pprint.pformat(vars(args)))
     set_seed(args.seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    logger.info("Deterministic training enabled with seed=%d" % args.seed)
 
     prior_channels = tuple(int(x) for x in args.prior_channels.split(",") if x.strip())
     if len(prior_channels) != 4:
@@ -175,6 +206,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_set = FLSea(args.train_list, "train", size=(args.img_size, args.img_size))
     val_pairs = load_file_list(args.val_list)
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(args.seed)
     train_loader = DataLoader(
         train_set,
         batch_size=args.bs,
@@ -182,6 +215,8 @@ def main():
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=True,
+        worker_init_fn=seed_data_worker,
+        generator=loader_generator,
     )
     logger.info(
         "Dataset loaded: train=%d samples, val=%d samples, train_iters_per_epoch=%d"
@@ -231,11 +266,12 @@ def main():
         train_latent_prior=not args.freeze_latent_prior,
     )
     logger.info(
-        "Prior structure: global=%s local=%s fft=%s deg_map=%s spatial_mean=%s plain_adapter=%s"
+        "Prior structure: global=%s local=%s fft=%s spectral_map=%s deg_map=%s spatial_mean=%s plain_adapter=%s"
         % (
             str(not args.disable_global_prior),
             str(not args.disable_local_prior),
             str(not args.disable_fft_prior),
+            str(not args.disable_fft_prior and not args.disable_local_prior),
             str(not args.disable_deg_map),
             str(args.deg_map_spatial_mean),
             str(args.plain_adapter),
@@ -305,6 +341,8 @@ def main():
         model.train()
         running_loss = 0.0
         for step, sample in enumerate(train_loader):
+            if epoch == 0 and step == 0:
+                logger.info("First training batch: %s" % ", ".join(sample["image_path"]))
             image = sample["image"].to(device, non_blocking=True)
             depth = sample["depth"].to(device, non_blocking=True)
             valid_mask = sample["valid_mask"].to(device, non_blocking=True).bool()
@@ -312,7 +350,12 @@ def main():
 
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
-                pred_disp = model(image)
+                if args.gauge_anchor_weight > 0:
+                    pred_disp, base_disp = model(image, return_base=True)
+                    loss_gauge = raw_disparity_gauge_loss(pred_disp, base_disp)
+                else:
+                    pred_disp = model(image)
+                    loss_gauge = pred_disp.new_zeros(())
                 sup_weight = valid_mask.float()
 
                 if args.consistency_hardness_weight > 0 and random.random() < args.consistency_aug_prob:
@@ -354,6 +397,7 @@ def main():
                     + args.silog_weight * loss_silog
                     + args.metric_weight * loss_metric
                     + args.grad_weight * loss_grad
+                    + args.gauge_anchor_weight * loss_gauge
                 )
 
             if not torch.isfinite(loss):
@@ -374,7 +418,7 @@ def main():
 
             if step % args.log_interval == 0:
                 logger.info(
-                    "Epoch %02d Iter %04d/%04d Step %06d Loss=%.6f L1=%.6f SiLog=%.6f Metric=%.6f Grad=%.6f HardMean=%.6f LR=%.2e"
+                    "Epoch %02d Iter %04d/%04d Step %06d Loss=%.6f L1=%.6f SiLog=%.6f Metric=%.6f Grad=%.6f Gauge=%.6f HardMean=%.6f LR=%.2e"
                     % (
                         epoch + 1,
                         step,
@@ -385,6 +429,7 @@ def main():
                         loss_silog.item(),
                         loss_metric.item(),
                         loss_grad.item(),
+                        loss_gauge.item(),
                         cons_map.mean().item(),
                         optimizer.param_groups[0]["lr"],
                     )

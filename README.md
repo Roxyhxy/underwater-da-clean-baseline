@@ -203,6 +203,10 @@ alignment protocol used by every other row.
 
 ### Fixed second-round ablation
 
+> Historical note: this matrix predates bounded prior injection, raw-disparity
+> gauge anchoring, deterministic loaders, and local spectral degradation maps.
+> Keep its logs only for debugging; do not use it for final reporting.
+
 The first round exposed two invalid controls: the global FiLM MLP had all Linear
 weights initialized to zero, and `no_deg_map` used a constant-one gate with a
 larger effective injection magnitude. Both are fixed in the current model.
@@ -235,6 +239,48 @@ Matching evaluation example:
 
 ```bash
 SEED=42 bash scripts/eval_flsea_fixed_ablation.sh local_only
+```
+
+### Current latent-prior ablation
+
+The current implementation adapts DAIR's which-where-what reasoning to monocular
+depth without replacing the pretrained DA2 geometry pathway:
+
+- **which:** a multi-scale convolutional latent encoder provides stage-wise priors;
+- **where:** magnitude/phase FFT cues and latent priors form spatial maps through
+  linear element-wise attention;
+- **what:** a global descriptor applies identity-anchored, bounded modulation at
+  the decoder bottleneck;
+- all prior corrections are zero-initialized and bounded, while a raw-disparity
+  mean/std anchor prevents affine-invariant losses from drifting the output gauge.
+
+This is a task-driven adaptation, not a reproduction of DAIR's separately
+pretrained VAE. DA2's backbone and original DPT decoder remain frozen in the fair
+structure ablation.
+
+Run one-epoch smoke tests first:
+
+```bash
+EPOCHS=1 RUN_TAG=smoke bash scripts/train_flsea_latent_prior_clean_ablation.sh local_only
+EPOCHS=1 RUN_TAG=smoke bash scripts/train_flsea_latent_prior_clean_ablation.sh local_spectral
+EPOCHS=1 RUN_TAG=smoke bash scripts/train_flsea_latent_prior_clean_ablation.sh full
+```
+
+Then run the five-epoch matrix with a fresh tag:
+
+```bash
+RUN_TAG=main_seed42 bash scripts/train_flsea_latent_prior_clean_ablation.sh local_only
+RUN_TAG=main_seed42 bash scripts/train_flsea_latent_prior_clean_ablation.sh local_spectral
+RUN_TAG=main_seed42 bash scripts/train_flsea_latent_prior_clean_ablation.sh no_fft
+RUN_TAG=main_seed42 bash scripts/train_flsea_latent_prior_clean_ablation.sh full
+```
+
+`local_spectral` isolates local frequency-aware where-reasoning; `no_fft`
+isolates spatial/global latent reasoning without frequency cues; `full` combines
+both. Use the matching evaluation entrypoint, for example:
+
+```bash
+RUN_TAG=main_seed42 bash scripts/eval_flsea_latent_prior_clean_ablation.sh full
 ```
 
 Optional overrides:

@@ -221,29 +221,66 @@ class UnderwaterLatentPriorEncoder(nn.Module):
 
 
 class DegMapGenerator(nn.Module):
-    """Generate explicit spatial degradation maps from decoder features and latent priors."""
+    """Generate DAIR-style spatial maps from spectral features and latent priors."""
 
-    def __init__(self, feat_ch, prior_ch, hidden_ch=64, out_ch=1):
+    def __init__(self, feat_ch, prior_ch, hidden_ch=64, out_ch=1, use_spectral=True):
         super().__init__()
-        self.prior_proj = nn.Conv2d(prior_ch, hidden_ch, kernel_size=1, bias=False)
+        self.use_spectral = bool(use_spectral)
         self.feat_proj = nn.Conv2d(feat_ch, hidden_ch, kernel_size=1, bias=False)
-        self.fuse = nn.Sequential(
-            ConvNormAct(hidden_ch * 2, hidden_ch, stride=1, groups=8),
+        if self.use_spectral:
+            self.spectral_proj = nn.Sequential(
+                nn.Conv2d(hidden_ch * 3, hidden_ch, kernel_size=1, bias=False),
+                nn.GELU(),
+            )
+        else:
+            self.spectral_proj = None
+        self.query = nn.Conv2d(hidden_ch, hidden_ch, kernel_size=1, bias=False)
+        self.key = nn.Conv2d(prior_ch, hidden_ch, kernel_size=1, bias=False)
+        self.value = nn.Conv2d(prior_ch, hidden_ch, kernel_size=1, bias=False)
+        self.map_head = nn.Sequential(
+            ConvNormAct(hidden_ch, hidden_ch, stride=1, groups=8),
             ResidualConvBlock(hidden_ch),
             nn.Conv2d(hidden_ch, out_ch, kernel_size=1),
         )
 
+    @staticmethod
+    def _spectral_features(feat, eps=1e-6):
+        device_type = feat.device.type if feat.device.type in ("cuda", "cpu") else "cuda"
+        with torch.amp.autocast(device_type=device_type, enabled=False):
+            centered = feat.float() - feat.float().mean(dim=(-2, -1), keepdim=True)
+            spectrum = torch.fft.fftshift(torch.fft.fft2(centered, norm="ortho"), dim=(-2, -1))
+            magnitude = torch.log1p(spectrum.abs())
+            magnitude = (magnitude - magnitude.mean(dim=(-2, -1), keepdim=True)) / magnitude.std(
+                dim=(-2, -1), keepdim=True, unbiased=False
+            ).clamp_min(eps)
+            phase = torch.angle(spectrum)
+            return torch.cat([magnitude, torch.sin(phase), torch.cos(phase)], dim=1)
+
     def forward(self, feat, prior):
         if feat.shape[-2:] != prior.shape[-2:]:
             prior = F.interpolate(prior, size=feat.shape[-2:], mode="bilinear", align_corners=False)
-        fused = torch.cat([self.feat_proj(feat), self.prior_proj(prior)], dim=1)
-        return torch.sigmoid(self.fuse(fused))
+        feat_base = self.feat_proj(feat)
+        if self.spectral_proj is not None:
+            spectral = self.spectral_proj(self._spectral_features(feat_base)).to(feat_base.dtype)
+            feat_base = feat_base + spectral
+
+        # Linear element-wise attention mirrors DAIR's where-reasoning block.
+        attention = torch.sigmoid(self.query(feat_base) * self.key(prior))
+        guided_prior = attention * self.value(prior)
+        return torch.sigmoid(self.map_head(feat_base + guided_prior))
 
 
 class MultiScaleDegMapGenerator(nn.Module):
     """Convenience wrapper for 4-scale degradation-map generation."""
 
-    def __init__(self, feat_channels, prior_channels, hidden_channels=None, out_ch=1):
+    def __init__(
+        self,
+        feat_channels,
+        prior_channels,
+        hidden_channels=None,
+        out_ch=1,
+        use_spectral=True,
+    ):
         super().__init__()
         if len(feat_channels) != len(prior_channels):
             raise ValueError("feat_channels and prior_channels must have the same length")
@@ -251,7 +288,13 @@ class MultiScaleDegMapGenerator(nn.Module):
             hidden_channels = [max(32, min(int(f), 128)) for f in feat_channels]
         self.heads = nn.ModuleList(
             [
-                DegMapGenerator(f_ch, p_ch, hidden_ch=h_ch, out_ch=out_ch)
+                DegMapGenerator(
+                    f_ch,
+                    p_ch,
+                    hidden_ch=h_ch,
+                    out_ch=out_ch,
+                    use_spectral=use_spectral,
+                )
                 for f_ch, p_ch, h_ch in zip(feat_channels, prior_channels, hidden_channels)
             ]
         )
