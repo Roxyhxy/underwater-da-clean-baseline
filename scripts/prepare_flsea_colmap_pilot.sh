@@ -9,12 +9,22 @@ TRAIN_LIST="/data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/train_half.txt"
 WORK_DIR="/data1/hxy/flsea_colmap_pilot"
 NUM_FRAMES=100
 
-# Set to false after the TIFF readability test succeeds once.
-RUN_READ_TEST="true"
-CAMERA_MODEL="SIMPLE_RADIAL"
+CALIB_FILE="/data1/hxy/DATASET/FLSeaVI/canyons/calibration/calibration_seaErra_imu_interp-kalibr-results-imucam.txt"
+CAMERA_MODEL="OPENCV"
+CAMERA_PARAMS="1175.3913431656817,1174.2805075232263,466.2595428966926,271.2116633091501,-0.13280386913948822,0.09799479194607102,-0.004731205238184176,0.0007132375646502103"
+
+# Physical GPU 1 becomes logical GPU 0 inside this process.
+PHYSICAL_GPU="${CUDA_VISIBLE_DEVICES:-1}"
+COLMAP_GPU_INDEX=0
+RUN_FEATURE_EXTRACTION="true"
 
 if [[ ! -f "${TRAIN_LIST}" ]]; then
   echo "Training list not found: ${TRAIN_LIST}" >&2
+  exit 1
+fi
+
+if [[ ! -f "${CALIB_FILE}" ]]; then
+  echo "Calibration file not found: ${CALIB_FILE}" >&2
   exit 1
 fi
 
@@ -30,17 +40,11 @@ fi
 IMAGES_DIR="${WORK_DIR}/images"
 PAIRS_FILE="${WORK_DIR}/pairs_${NUM_FRAMES}.txt"
 RGB_FILE="${WORK_DIR}/rgb_${NUM_FRAMES}.txt"
-READ_TEST_DB="${WORK_DIR}/read_test.db"
+SPARSE_DIR="${WORK_DIR}/sparse_opencv"
+DATABASE_PATH="${SPARSE_DIR}/database.db"
+FEATURE_LOG="${SPARSE_DIR}/feature_extraction.log"
 
-mkdir -p "${IMAGES_DIR}"
-
-# Do not silently mix an earlier pilot set with this one.
-existing_count="$(find "${IMAGES_DIR}" -mindepth 1 -maxdepth 1 | wc -l)"
-if [[ "${existing_count}" -ne 0 ]]; then
-  echo "Image directory is not empty: ${IMAGES_DIR}" >&2
-  echo "Use a new WORK_DIR, or inspect and clear this pilot directory manually." >&2
-  exit 1
-fi
+mkdir -p "${IMAGES_DIR}" "${SPARSE_DIR}"
 
 head -n "${NUM_FRAMES}" "${TRAIN_LIST}" > "${PAIRS_FILE}"
 pair_count="$(wc -l < "${PAIRS_FILE}")"
@@ -70,7 +74,18 @@ while read -r rgb depth extra; do
   seen_names["${name}"]=1
 
   printf '%s\n' "${rgb}" >> "${RGB_FILE}"
-  ln -s "${rgb}" "${IMAGES_DIR}/${name}"
+  link_path="${IMAGES_DIR}/${name}"
+  if [[ -L "${link_path}" ]]; then
+    if [[ "$(readlink -f "${link_path}")" != "$(readlink -f "${rgb}")" ]]; then
+      echo "Existing link points to another file: ${link_path}" >&2
+      exit 1
+    fi
+  elif [[ -e "${link_path}" ]]; then
+    echo "Expected a symbolic link but found another file: ${link_path}" >&2
+    exit 1
+  else
+    ln -s "${rgb}" "${link_path}"
+  fi
 done < "${PAIRS_FILE}"
 
 linked_count="$(find "${IMAGES_DIR}" -maxdepth 1 -type l | wc -l)"
@@ -83,22 +98,31 @@ echo "Prepared ${linked_count} RGB frames."
 echo "COLMAP binary: ${COLMAP_BIN}"
 echo "Images: ${IMAGES_DIR}"
 echo "Pairs with GT paths: ${PAIRS_FILE}"
+echo "Calibration source: ${CALIB_FILE}"
+echo "Camera model: ${CAMERA_MODEL}"
+echo "Camera parameters: ${CAMERA_PARAMS}"
 
-if [[ "${RUN_READ_TEST}" != "true" ]]; then
+if [[ "${RUN_FEATURE_EXTRACTION}" != "true" ]]; then
   exit 0
 fi
 
-if [[ -e "${READ_TEST_DB}" ]]; then
-  echo "Read-test database already exists: ${READ_TEST_DB}" >&2
-  echo "Set a new WORK_DIR or remove only this test database after inspecting it." >&2
+if [[ -e "${DATABASE_PATH}" ]]; then
+  echo "Formal COLMAP database already exists: ${DATABASE_PATH}" >&2
+  echo "Refusing to mix new settings into an existing database." >&2
+  echo "Inspect it first, or choose a new SPARSE_DIR in this script." >&2
   exit 1
 fi
 
-"${COLMAP_BIN}" feature_extractor \
-  --database_path "${READ_TEST_DB}" \
+CUDA_VISIBLE_DEVICES="${PHYSICAL_GPU}" "${COLMAP_BIN}" feature_extractor \
+  --database_path "${DATABASE_PATH}" \
   --image_path "${IMAGES_DIR}" \
   --ImageReader.camera_model "${CAMERA_MODEL}" \
+  --ImageReader.camera_params "${CAMERA_PARAMS}" \
   --ImageReader.single_camera 1 \
-  --FeatureExtraction.use_gpu 0
+  --FeatureExtraction.use_gpu 1 \
+  --FeatureExtraction.gpu_index "${COLMAP_GPU_INDEX}" \
+  2>&1 | tee "${FEATURE_LOG}"
 
-echo "COLMAP read test completed successfully."
+echo "Formal GPU feature extraction completed successfully."
+echo "Database: ${DATABASE_PATH}"
+echo "Log: ${FEATURE_LOG}"
