@@ -94,6 +94,13 @@ def load_model(args, device, logger):
         deg_map_spatial_mean=args.deg_map_spatial_mean,
         use_plain_adapter=args.plain_adapter,
         adapter_hidden=args.adapter_hidden,
+        use_encoder_lora=args.encoder_lora,
+        encoder_lora_mode=args.encoder_lora_mode,
+        encoder_lora_condition_source=args.encoder_lora_condition_source,
+        encoder_lora_rank=args.encoder_lora_rank,
+        encoder_lora_alpha=args.encoder_lora_alpha,
+        encoder_lora_dropout=args.encoder_lora_dropout,
+        encoder_lora_last_n_blocks=args.encoder_lora_last_n_blocks,
     ).to(device)
     model.load_base_weights(base_ckpt, strict=False)
     base_load_stats = model.base_load_stats
@@ -230,6 +237,15 @@ def main():
     )
     parser.add_argument("--plain-adapter", action="store_true")
     parser.add_argument("--adapter-hidden", default=256, type=int)
+    parser.add_argument("--encoder-lora", action="store_true")
+    parser.add_argument("--encoder-lora-mode", default="gated", choices=["plain", "gated"])
+    parser.add_argument(
+        "--encoder-lora-condition-source", default="fused", choices=["fused", "fft"]
+    )
+    parser.add_argument("--encoder-lora-rank", default=8, type=int)
+    parser.add_argument("--encoder-lora-alpha", default=16.0, type=float)
+    parser.add_argument("--encoder-lora-dropout", default=0.0, type=float)
+    parser.add_argument("--encoder-lora-last-n-blocks", default=12, type=int)
     parser.add_argument("--save-dir", required=True)
     parser.add_argument("--save-raw-disparity", action="store_true")
     parser.add_argument("--raw-output-dir", default="")

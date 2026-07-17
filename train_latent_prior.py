@@ -23,6 +23,7 @@ from train import (
     random_underwater_consistency_augment,
     set_seed,
 )
+from util.hole_geometry import hole_geometry_preservation_loss
 from util.utils import init_log
 
 
@@ -66,6 +67,7 @@ def summarize_trainable_parameters(model):
     summary = {
         "latent_prior": [],
         "prior_head": [],
+        "encoder_lora": [],
         "plain_adapter": [],
         "base_head": [],
         "backbone": [],
@@ -73,7 +75,11 @@ def summarize_trainable_parameters(model):
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if name.startswith("latent_prior_encoder."):
+        if name.startswith("pretrained.") and any(
+            token in name for token in (".lora_a.", ".lora_b.", ".condition_gate.")
+        ):
+            summary["encoder_lora"].append((name, param))
+        elif name.startswith("latent_prior_encoder."):
             summary["latent_prior"].append((name, param))
         elif name.startswith("depth_head.plain_adapters."):
             summary["plain_adapter"].append((name, param))
@@ -94,6 +100,7 @@ def build_optimizer(model, args):
 
     latent_prior_params = [param for _, param in summary["latent_prior"]]
     prior_head_params = [param for _, param in summary["prior_head"]]
+    encoder_lora_params = [param for _, param in summary["encoder_lora"]]
     plain_adapter_params = [param for _, param in summary["plain_adapter"]]
     base_head_params = [param for _, param in summary["base_head"]]
     backbone_params = [param for _, param in summary["backbone"]]
@@ -102,6 +109,8 @@ def build_optimizer(model, args):
         groups.append({"params": latent_prior_params, "lr": args.prior_lr or args.lr, "name": "latent_prior"})
     if prior_head_params:
         groups.append({"params": prior_head_params, "lr": args.prior_head_lr or args.lr, "name": "prior_head"})
+    if encoder_lora_params:
+        groups.append({"params": encoder_lora_params, "lr": args.encoder_lora_lr or args.lr, "name": "encoder_lora"})
     if plain_adapter_params:
         groups.append({"params": plain_adapter_params, "lr": args.adapter_lr or args.lr, "name": "plain_adapter"})
     if base_head_params:
@@ -124,6 +133,7 @@ def main():
     parser.add_argument("--prior-head-lr", default=0.0, type=float)
     parser.add_argument("--head-lr", default=0.0, type=float)
     parser.add_argument("--backbone-lr", default=0.0, type=float)
+    parser.add_argument("--encoder-lora-lr", default=0.0, type=float)
     parser.add_argument("--adapter-lr", default=0.0, type=float)
     parser.add_argument("--pretrained-from", required=True)
     parser.add_argument("--init-from", default="")
@@ -154,6 +164,15 @@ def main():
     )
     parser.add_argument("--plain-adapter", action="store_true")
     parser.add_argument("--adapter-hidden", default=256, type=int)
+    parser.add_argument("--encoder-lora", action="store_true")
+    parser.add_argument("--encoder-lora-mode", default="gated", choices=["plain", "gated"])
+    parser.add_argument(
+        "--encoder-lora-condition-source", default="fused", choices=["fused", "fft"]
+    )
+    parser.add_argument("--encoder-lora-rank", default=8, type=int)
+    parser.add_argument("--encoder-lora-alpha", default=16.0, type=float)
+    parser.add_argument("--encoder-lora-dropout", default=0.0, type=float)
+    parser.add_argument("--encoder-lora-last-n-blocks", default=12, type=int)
     parser.add_argument("--freeze-backbone", action="store_true")
     parser.add_argument("--freeze-base-head", action="store_true")
     parser.add_argument("--freeze-latent-prior", action="store_true")
@@ -167,6 +186,17 @@ def main():
         default=0.0,
         type=float,
         help="Anchor raw disparity mean/std to frozen DA2 output; 0 disables it",
+    )
+    parser.add_argument(
+        "--hole-geometry-weight",
+        default=0.0,
+        type=float,
+        help="Preserve frozen-DA2 multi-scale disparity gradients inside true depth holes",
+    )
+    parser.add_argument(
+        "--hole-geometry-scales",
+        default="1,2,4",
+        help="Comma-separated pixel offsets used by the affine-invariant hole geometry loss",
     )
     parser.add_argument("--consistency-hardness-weight", default=0.0, type=float)
     parser.add_argument("--consistency-hardness-clamp-min", default=0.90, type=float)
@@ -202,6 +232,15 @@ def main():
     prior_channels = tuple(int(x) for x in args.prior_channels.split(",") if x.strip())
     if len(prior_channels) != 4:
         raise ValueError("--prior-channels must contain exactly 4 comma-separated integers")
+    hole_geometry_scales = tuple(int(x) for x in args.hole_geometry_scales.split(",") if x.strip())
+    if not hole_geometry_scales or any(scale <= 0 for scale in hole_geometry_scales):
+        raise ValueError("--hole-geometry-scales must contain positive comma-separated integers")
+    if args.hole_geometry_weight < 0:
+        raise ValueError("--hole-geometry-weight must be non-negative")
+    if args.hole_geometry_weight > 0 and (not args.freeze_backbone or not args.freeze_base_head):
+        logger.warning(
+            "Hole geometry reference is only immutable when both backbone and base head are frozen"
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_set = FLSea(args.train_list, "train", size=(args.img_size, args.img_size))
@@ -243,6 +282,13 @@ def main():
         deg_map_spatial_mean=args.deg_map_spatial_mean,
         use_plain_adapter=args.plain_adapter,
         adapter_hidden=args.adapter_hidden,
+        use_encoder_lora=args.encoder_lora,
+        encoder_lora_mode=args.encoder_lora_mode,
+        encoder_lora_condition_source=args.encoder_lora_condition_source,
+        encoder_lora_rank=args.encoder_lora_rank,
+        encoder_lora_alpha=args.encoder_lora_alpha,
+        encoder_lora_dropout=args.encoder_lora_dropout,
+        encoder_lora_last_n_blocks=args.encoder_lora_last_n_blocks,
     ).to(device)
     model.load_base_weights(base_ckpt, strict=False)
     base_load_stats = model.base_load_stats
@@ -266,7 +312,7 @@ def main():
         train_latent_prior=not args.freeze_latent_prior,
     )
     logger.info(
-        "Prior structure: global=%s local=%s fft=%s spectral_map=%s deg_map=%s spatial_mean=%s plain_adapter=%s"
+        "Prior structure: global=%s local=%s fft=%s spectral_map=%s deg_map=%s spatial_mean=%s plain_adapter=%s encoder_lora=%s lora_mode=%s condition_source=%s lora_blocks=%d"
         % (
             str(not args.disable_global_prior),
             str(not args.disable_local_prior),
@@ -275,6 +321,10 @@ def main():
             str(not args.disable_deg_map),
             str(args.deg_map_spatial_mean),
             str(args.plain_adapter),
+            str(args.encoder_lora),
+            args.encoder_lora_mode,
+            args.encoder_lora_condition_source,
+            args.encoder_lora_last_n_blocks if args.encoder_lora else 0,
         )
     )
 
@@ -286,10 +336,11 @@ def main():
 
     param_summary = summarize_trainable_parameters(model)
     logger.info(
-        "Trainable params | latent_prior=%d | prior_head=%d | plain_adapter=%d | base_head=%d | backbone=%d"
+        "Trainable params | latent_prior=%d | prior_head=%d | encoder_lora=%d | plain_adapter=%d | base_head=%d | backbone=%d"
         % (
             _count_params([param for _, param in param_summary["latent_prior"]]),
             _count_params([param for _, param in param_summary["prior_head"]]),
+            _count_params([param for _, param in param_summary["encoder_lora"]]),
             _count_params([param for _, param in param_summary["plain_adapter"]]),
             _count_params([param for _, param in param_summary["base_head"]]),
             _count_params([param for _, param in param_summary["backbone"]]),
@@ -312,6 +363,14 @@ def main():
             str(args.consistency_hardness_weight > 0 and args.consistency_aug_prob > 0),
             args.consistency_hardness_weight,
             args.consistency_aug_prob,
+        )
+    )
+    logger.info(
+        "Hole geometry branch: enabled=%s weight=%.4f scales=%s"
+        % (
+            str(args.hole_geometry_weight > 0),
+            args.hole_geometry_weight,
+            ",".join(str(scale) for scale in hole_geometry_scales),
         )
     )
     logger.info("Numerics: amp=%s grad_clip=%.4f" % (str(amp_enabled), args.grad_clip))
@@ -345,17 +404,31 @@ def main():
                 logger.info("First training batch: %s" % ", ".join(sample["image_path"]))
             image = sample["image"].to(device, non_blocking=True)
             depth = sample["depth"].to(device, non_blocking=True)
-            valid_mask = sample["valid_mask"].to(device, non_blocking=True).bool()
-            valid_mask = valid_mask & (depth >= args.min_depth) & (depth <= args.max_depth)
+            observed_mask = sample["valid_mask"].to(device, non_blocking=True).bool()
+            valid_mask = observed_mask & (depth >= args.min_depth) & (depth <= args.max_depth)
 
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
-                if args.gauge_anchor_weight > 0:
+                need_base_reference = args.gauge_anchor_weight > 0 or args.hole_geometry_weight > 0
+                if need_base_reference:
                     pred_disp, base_disp = model(image, return_base=True)
-                    loss_gauge = raw_disparity_gauge_loss(pred_disp, base_disp)
+                    if args.gauge_anchor_weight > 0:
+                        loss_gauge = raw_disparity_gauge_loss(pred_disp, base_disp)
+                    else:
+                        loss_gauge = pred_disp.new_zeros(())
+                    if args.hole_geometry_weight > 0:
+                        loss_hole_geometry = hole_geometry_preservation_loss(
+                            pred_disp,
+                            base_disp,
+                            observed_mask,
+                            scales=hole_geometry_scales,
+                        )
+                    else:
+                        loss_hole_geometry = pred_disp.new_zeros(())
                 else:
                     pred_disp = model(image)
                     loss_gauge = pred_disp.new_zeros(())
+                    loss_hole_geometry = pred_disp.new_zeros(())
                 sup_weight = valid_mask.float()
 
                 if args.consistency_hardness_weight > 0 and random.random() < args.consistency_aug_prob:
@@ -398,6 +471,7 @@ def main():
                     + args.metric_weight * loss_metric
                     + args.grad_weight * loss_grad
                     + args.gauge_anchor_weight * loss_gauge
+                    + args.hole_geometry_weight * loss_hole_geometry
                 )
 
             if not torch.isfinite(loss):
@@ -418,7 +492,7 @@ def main():
 
             if step % args.log_interval == 0:
                 logger.info(
-                    "Epoch %02d Iter %04d/%04d Step %06d Loss=%.6f L1=%.6f SiLog=%.6f Metric=%.6f Grad=%.6f Gauge=%.6f HardMean=%.6f LR=%.2e"
+                    "Epoch %02d Iter %04d/%04d Step %06d Loss=%.6f L1=%.6f SiLog=%.6f Metric=%.6f Grad=%.6f Gauge=%.6f HoleGeom=%.6f HoleRatio=%.4f HardMean=%.6f LR=%.2e"
                     % (
                         epoch + 1,
                         step,
@@ -430,6 +504,8 @@ def main():
                         loss_metric.item(),
                         loss_grad.item(),
                         loss_gauge.item(),
+                        loss_hole_geometry.item(),
+                        (~observed_mask).float().mean().item(),
                         cons_map.mean().item(),
                         optimizer.param_groups[0]["lr"],
                     )
@@ -444,6 +520,20 @@ def main():
         if model.depth_head.scalar_gate_logits is not None:
             gates = torch.sigmoid(model.depth_head.scalar_gate_logits).detach().cpu().tolist()
             logger.info("Learned scalar gates: %s" % ", ".join(f"{gate:.4f}" for gate in gates))
+        if model.use_encoder_lora:
+            lora_b_norm = sum(
+                module.lora_b.weight.detach().float().norm().item()
+                for module in model.encoder_lora_modules
+            )
+            condition_norm = sum(
+                module.condition_gate.weight.detach().float().norm().item()
+                for module in model.encoder_lora_modules
+                if module.condition_gate is not None
+            )
+            logger.info(
+                "Encoder LoRA norms: lora_b_sum=%.6f condition_gate_sum=%.6f"
+                % (lora_b_norm, condition_norm)
+            )
         model.eval()
         metrics = evaluate_latent_prior(
             model,

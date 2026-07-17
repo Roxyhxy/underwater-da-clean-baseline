@@ -203,7 +203,7 @@ class UnderwaterLatentPriorEncoder(nn.Module):
             nn.LayerNorm(global_dim),
         )
 
-    def forward(self, image):
+    def forward(self, image, return_components=False):
         p1 = self.stem(image)
         p2 = self.stage2(p1)
         p3 = self.stage3(p2)
@@ -217,6 +217,8 @@ class UnderwaterLatentPriorEncoder(nn.Module):
         z_spatial = self.global_pool(p4)
         z_fft = self.global_fft(image) if self.use_fft_prior else torch.zeros_like(z_spatial)
         z_deg = self.global_fuse(torch.cat([z_spatial, z_fft], dim=1))
+        if return_components:
+            return z_deg, pyramid, {"z_spatial": z_spatial, "z_fft": z_fft}
         return z_deg, pyramid
 
 

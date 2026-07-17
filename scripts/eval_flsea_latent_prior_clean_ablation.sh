@@ -20,10 +20,34 @@ SAVE_DIR="${SAVE_DIR:-eval/clean_${VARIANT}_${RUN_TAG}_${SPLIT_NAME}}"
 
 STRUCTURE_ARGS=()
 case "${VARIANT}" in
-  local_only|local_only_no_anchor)
+  encoder_lora_plain)
+    STRUCTURE_ARGS+=(--disable-global-prior --disable-local-prior --disable-fft-prior)
+    STRUCTURE_ARGS+=(--encoder-lora --encoder-lora-mode plain)
+    ;;
+  encoder_lora_gated)
+    STRUCTURE_ARGS+=(--disable-global-prior --disable-local-prior)
+    STRUCTURE_ARGS+=(--encoder-lora --encoder-lora-mode gated)
+    ;;
+  encoder_lora_aqua)
+    STRUCTURE_ARGS+=(--disable-global-prior --disable-local-prior)
+    STRUCTURE_ARGS+=(--encoder-lora --encoder-lora-mode gated --encoder-lora-condition-source fft)
+    ;;
+  hybrid_lora_plain)
+    STRUCTURE_ARGS+=(--disable-global-prior)
+    STRUCTURE_ARGS+=(--encoder-lora --encoder-lora-mode plain)
+    ;;
+  hybrid_lora_gated|hybrid_lora_gated_hole)
+    STRUCTURE_ARGS+=(--disable-global-prior)
+    STRUCTURE_ARGS+=(--encoder-lora --encoder-lora-mode gated)
+    ;;
+  hybrid_lora_aqua|hybrid_lora_aqua_hole)
+    STRUCTURE_ARGS+=(--disable-global-prior)
+    STRUCTURE_ARGS+=(--encoder-lora --encoder-lora-mode gated --encoder-lora-condition-source fft)
+    ;;
+  local_only|local_only_no_anchor|local_only_hole)
     STRUCTURE_ARGS+=(--disable-global-prior --disable-fft-prior)
     ;;
-  local_spectral)
+  local_spectral|local_spectral_hole)
     STRUCTURE_ARGS+=(--disable-global-prior)
     ;;
   no_fft)
@@ -48,6 +72,8 @@ python eval_latent_prior.py \
   --val-list "${SPLIT_LIST}" --img-size 518 --max-depth 40.0 \
   --prior-base-ch 32 --prior-channels 32,64,128,256 --latent-dim 128 \
   --prior-fft-size 64 --prior-stat-hidden 64 --deg-map-scale 0.1 \
+  --encoder-lora-rank 8 --encoder-lora-alpha 16 --encoder-lora-dropout 0 \
+  --encoder-lora-last-n-blocks 12 \
   --save-dir "${SAVE_DIR}" \
   --save-raw-disparity --raw-output-dir "${SAVE_DIR}/raw_disparity" \
   --raw-colormap Spectral_r \

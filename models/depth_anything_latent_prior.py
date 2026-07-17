@@ -8,6 +8,7 @@ from depth_anything_v2.dinov2 import DINOv2
 from depth_anything_v2.util.blocks import FeatureFusionBlock, _make_scratch
 from depth_anything_v2.util.transform import NormalizeImage, PrepareForNet, Resize
 
+from .degradation_lora import DegradationGatedLoRALinear, inject_qkv_lora
 from .underwater_latent_prior import MultiScaleDegMapGenerator, UnderwaterLatentPriorEncoder
 
 
@@ -228,16 +229,7 @@ class LatentPriorDPTHead(nn.Module):
         out = self.scratch.output_conv2(out)
         return out, (path_4, path_3, path_2, path_1)
 
-    def forward(
-        self,
-        out_features,
-        patch_h,
-        patch_w,
-        z_deg,
-        prior_pyramid,
-        return_aux=False,
-        return_base=False,
-    ):
+    def _project_backbone_features(self, out_features, patch_h, patch_w):
         out = []
         for i, x in enumerate(out_features):
             if self.use_clstoken:
@@ -253,12 +245,31 @@ class LatentPriorDPTHead(nn.Module):
             out.append(x)
 
         layer_1, layer_2, layer_3, layer_4 = out
-        layer_1_rn = self.scratch.layer1_rn(layer_1)
-        layer_2_rn = self.scratch.layer2_rn(layer_2)
-        layer_3_rn = self.scratch.layer3_rn(layer_3)
-        layer_4_rn = self.scratch.layer4_rn(layer_4)
+        return [
+            self.scratch.layer1_rn(layer_1),
+            self.scratch.layer2_rn(layer_2),
+            self.scratch.layer3_rn(layer_3),
+            self.scratch.layer4_rn(layer_4),
+        ]
 
-        base_layer_feats = [layer_1_rn, layer_2_rn, layer_3_rn, layer_4_rn]
+    def forward_base(self, out_features, patch_h, patch_w):
+        """Decode frozen DA2 features without any latent-prior correction."""
+        layer_feats = self._project_backbone_features(out_features, patch_h, patch_w)
+        out, _ = self._decode(layer_feats, patch_h, patch_w)
+        return out
+
+    def forward(
+        self,
+        out_features,
+        patch_h,
+        patch_w,
+        z_deg,
+        prior_pyramid,
+        return_aux=False,
+        return_base=False,
+    ):
+        base_layer_feats = self._project_backbone_features(out_features, patch_h, patch_w)
+        layer_1_rn, layer_2_rn, layer_3_rn, layer_4_rn = base_layer_feats
         base_out = None
         if return_base:
             with torch.no_grad():
@@ -345,6 +356,13 @@ class DepthAnythingLatentPrior(nn.Module):
         deg_map_spatial_mean=False,
         use_plain_adapter=False,
         adapter_hidden=256,
+        use_encoder_lora=False,
+        encoder_lora_mode="gated",
+        encoder_lora_condition_source="fused",
+        encoder_lora_rank=8,
+        encoder_lora_alpha=16.0,
+        encoder_lora_dropout=0.0,
+        encoder_lora_last_n_blocks=12,
     ):
         super().__init__()
         self.intermediate_layer_idx = {
@@ -361,8 +379,31 @@ class DepthAnythingLatentPrior(nn.Module):
         self.use_deg_map = bool(use_deg_map)
         self.deg_map_spatial_mean = bool(deg_map_spatial_mean)
         self.use_plain_adapter = bool(use_plain_adapter)
+        self.use_encoder_lora = bool(use_encoder_lora)
+        self.encoder_lora_mode = str(encoder_lora_mode)
+        if encoder_lora_condition_source not in {"fused", "fft"}:
+            raise ValueError("encoder_lora_condition_source must be 'fused' or 'fft'")
+        self.encoder_lora_condition_source = str(encoder_lora_condition_source)
         self.latent_dim = int(latent_dim)
         self.pretrained = DINOv2(model_name=encoder)
+        self.encoder_lora_modules = []
+        if self.use_encoder_lora:
+            self.injected_encoder_lora = inject_qkv_lora(
+                self.pretrained,
+                rank=encoder_lora_rank,
+                alpha=encoder_lora_alpha,
+                dropout=encoder_lora_dropout,
+                condition_dim=latent_dim,
+                mode=self.encoder_lora_mode,
+                last_n_blocks=encoder_lora_last_n_blocks,
+            )
+            self.encoder_lora_modules = [
+                module
+                for module in self.pretrained.modules()
+                if isinstance(module, DegradationGatedLoRALinear)
+            ]
+        else:
+            self.injected_encoder_lora = []
         self.latent_prior_encoder = UnderwaterLatentPriorEncoder(
             in_ch=3,
             base_ch=prior_base_ch,
@@ -411,7 +452,12 @@ class DepthAnythingLatentPrior(nn.Module):
             filtered_state[key] = value
 
         expected_base_keys = {
-            key for key in own_state if not key.startswith(new_branch_prefixes)
+            key
+            for key in own_state
+            if not key.startswith(new_branch_prefixes)
+            and ".lora_a." not in key
+            and ".lora_b." not in key
+            and ".condition_gate." not in key
         }
         loaded_base_keys = expected_base_keys.intersection(filtered_state)
         missing_base_keys = sorted(expected_base_keys - loaded_base_keys)
@@ -429,6 +475,24 @@ class DepthAnythingLatentPrior(nn.Module):
     def unfreeze_pretrained_backbone(self):
         for param in self.pretrained.parameters():
             param.requires_grad = True
+
+    def set_encoder_lora_condition(self, condition):
+        for module in self.encoder_lora_modules:
+            module.set_condition(condition)
+
+    def set_encoder_lora_enabled(self, enabled):
+        for module in self.encoder_lora_modules:
+            module.enabled = bool(enabled)
+
+    def unfreeze_encoder_lora(self):
+        for module in self.encoder_lora_modules:
+            for param in module.lora_a.parameters():
+                param.requires_grad = True
+            for param in module.lora_b.parameters():
+                param.requires_grad = True
+            if module.condition_gate is not None:
+                for param in module.condition_gate.parameters():
+                    param.requires_grad = True
 
     def freeze_base_depth_head(self):
         protected_prefixes = (
@@ -467,15 +531,37 @@ class DepthAnythingLatentPrior(nn.Module):
             self._set_module_trainable(self.depth_head.prior_to_feat, False)
             self._set_module_trainable(self.latent_prior_encoder.pyramid_proj, False)
 
-        if not self.use_global_prior:
+        needs_fused_descriptor = self.use_global_prior or (
+            self.use_encoder_lora
+            and self.encoder_lora_mode == "gated"
+            and self.encoder_lora_condition_source == "fused"
+        )
+        needs_fft_descriptor = self.use_fft_prior and (
+            needs_fused_descriptor
+            or (
+                self.use_encoder_lora
+                and self.encoder_lora_mode == "gated"
+                and self.encoder_lora_condition_source == "fft"
+            )
+        )
+        if not needs_fused_descriptor:
             self._set_module_trainable(self.depth_head.global_mod, False)
             self._set_module_trainable(self.latent_prior_encoder.global_pool, False)
-            self._set_module_trainable(self.latent_prior_encoder.global_fft, False)
             self._set_module_trainable(self.latent_prior_encoder.global_fuse, False)
-        elif not self.use_fft_prior:
+        else:
+            if not self.use_global_prior:
+                self._set_module_trainable(self.depth_head.global_mod, False)
+
+        if not needs_fft_descriptor:
             self._set_module_trainable(self.latent_prior_encoder.global_fft, False)
 
-        if not self.use_global_prior and not self.use_local_prior:
+        if not self.use_local_prior and not needs_fused_descriptor:
+            self._set_module_trainable(self.latent_prior_encoder.stem, False)
+            self._set_module_trainable(self.latent_prior_encoder.stage2, False)
+            self._set_module_trainable(self.latent_prior_encoder.stage3, False)
+            self._set_module_trainable(self.latent_prior_encoder.stage4, False)
+
+        if not needs_fused_descriptor and not needs_fft_descriptor and not self.use_local_prior:
             self._set_module_trainable(self.latent_prior_encoder, False)
 
         if not self.use_plain_adapter:
@@ -502,17 +588,69 @@ class DepthAnythingLatentPrior(nn.Module):
         else:
             self.freeze_latent_prior_encoder()
         self.freeze_disabled_prior_components()
+        if freeze_backbone and self.use_encoder_lora:
+            self.unfreeze_encoder_lora()
 
     def forward(self, image, return_aux=False, return_base=False):
         patch_h, patch_w = image.shape[-2] // 14, image.shape[-1] // 14
-        out_features = self.pretrained.get_intermediate_layers(
-            image, self.intermediate_layer_idx[self.encoder], return_class_token=True
+        needs_latent = self.use_global_prior or self.use_local_prior or (
+            self.use_encoder_lora and self.encoder_lora_mode == "gated"
         )
-        if self.use_global_prior or self.use_local_prior:
-            z_deg, prior_pyramid = self.latent_prior_encoder(image)
+        if needs_latent:
+            need_components = (
+                self.use_encoder_lora
+                and self.encoder_lora_mode == "gated"
+                and self.encoder_lora_condition_source == "fft"
+            )
+            prior_output = self.latent_prior_encoder(image, return_components=need_components)
+            if need_components:
+                z_deg, prior_pyramid, prior_components = prior_output
+                encoder_condition = prior_components["z_fft"]
+            else:
+                z_deg, prior_pyramid = prior_output
+                encoder_condition = z_deg
         else:
             z_deg = image.new_zeros(image.shape[0], self.latent_dim)
             prior_pyramid = [None] * 4
+            encoder_condition = None
+
+        self.set_encoder_lora_condition(
+            encoder_condition if self.encoder_lora_mode == "gated" else None
+        )
+        try:
+            out_features = self.pretrained.get_intermediate_layers(
+                image, self.intermediate_layer_idx[self.encoder], return_class_token=True
+            )
+        finally:
+            self.set_encoder_lora_condition(None)
+
+        # A geometry anchor must reference the untouched DA2 encoder, not the
+        # current LoRA-modulated encoder. Compute it in a separate frozen pass.
+        if return_base and self.use_encoder_lora:
+            self.set_encoder_lora_enabled(False)
+            try:
+                with torch.no_grad():
+                    base_features = self.pretrained.get_intermediate_layers(
+                        image, self.intermediate_layer_idx[self.encoder], return_class_token=True
+                    )
+                    base_depth = self.depth_head.forward_base(base_features, patch_h, patch_w)
+            finally:
+                self.set_encoder_lora_enabled(True)
+            depth = self.depth_head(
+                out_features,
+                patch_h,
+                patch_w,
+                z_deg,
+                prior_pyramid,
+                return_aux=return_aux,
+                return_base=False,
+            )
+            if return_aux:
+                pred, aux = depth
+                aux["base_prediction"] = base_depth
+                return pred.squeeze(1), aux
+            return depth.squeeze(1), base_depth.squeeze(1)
+
         depth = self.depth_head(
             out_features,
             patch_h,
