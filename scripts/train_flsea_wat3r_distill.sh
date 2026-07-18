@@ -13,7 +13,7 @@ CKPT="${CKPT:-/data1/hxy/Depth-Anything-V2/checkpoints/depth_anything_v2_vits.pt
 INIT_FROM="${INIT_FROM:-runs/clean_hybrid_lora_aqua_seed42/best_abs_rel.pth}"
 TRAIN_LIST="${TRAIN_LIST:-/data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/train_half.txt}"
 VAL_LIST="${VAL_LIST:-/data1/hxy/Depth-Anything-V2/DA_0/dataset/splits/flsea/val.txt}"
-WAT3R_MANIFEST="${WAT3R_MANIFEST:-/data1/hxy/flsea_wat3r_teacher/manifest_all.csv}"
+WAT3R_MANIFEST="${WAT3R_MANIFEST:-/data1/hxy/flsea_wat3r_train_teacher/manifest_all.csv}"
 SAVE_PATH="${SAVE_PATH:-runs/wat3r_distill_seed${SEED}}"
 
 if [[ ! -f "${INIT_FROM}" ]]; then

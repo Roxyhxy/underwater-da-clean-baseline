@@ -309,7 +309,7 @@ confidence, intrinsics, and extrinsics from the same forward pass so that its
 geometry gauge is internally consistent. The DA2 student still processes every
 view independently and remains single-image-only at inference.
 
-Generate one scene at a time:
+Generate one scene first as a pipeline pilot:
 
 ```bash
 SCENE=flatiron \
@@ -318,6 +318,23 @@ WAT3R_ROOT=/data1/hxy/Wat3R \
 WAT3R_CKPT=/data1/hxy/Wat3R/checkpoints/wat3r.pth \
 bash scripts/generate_flsea_wat3r_teacher.sh
 ```
+
+For formal training, generate every scene represented in the training split:
+
+```bash
+TRAIN_LIST=/data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/train_half.txt \
+DATASET_ROOT=/data1/hxy/DATASET/FLSeaVI \
+WAT3R_ROOT=/data1/hxy/Wat3R \
+WAT3R_CKPT=/data1/hxy/Wat3R/checkpoints/wat3r.pth \
+OUTPUT_ROOT=/data1/hxy/flsea_wat3r_train_teacher \
+bash scripts/generate_flsea_wat3r_all_train.sh
+```
+
+The all-scene command groups the training list by scene, sorts each scene by
+frame name, generates its windows, and writes `manifest_all.csv` automatically.
+It never scans validation/test RGB frames. Existing scene manifests are reused,
+so the command can resume after interruption; pass `--overwrite` only when a
+scene must be regenerated.
 
 Merge completed scene manifests:
 
@@ -331,7 +348,7 @@ Audit paths, matching triplets, and static-mask coverage before training:
 
 ```bash
 python tools/audit_wat3r_teacher.py \
-  --manifest /data1/hxy/flsea_wat3r_teacher/manifest_all.csv \
+  --manifest /data1/hxy/flsea_wat3r_train_teacher/manifest_all.csv \
   --train-list /data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/train_half.txt
 ```
 
@@ -339,7 +356,7 @@ Start stage two from the matching research-one checkpoint:
 
 ```bash
 INIT_FROM=runs/clean_hybrid_lora_aqua_seed42/best_abs_rel.pth \
-WAT3R_MANIFEST=/data1/hxy/flsea_wat3r_teacher/manifest_all.csv \
+WAT3R_MANIFEST=/data1/hxy/flsea_wat3r_train_teacher/manifest_all.csv \
 bash scripts/train_flsea_wat3r_distill.sh
 ```
 

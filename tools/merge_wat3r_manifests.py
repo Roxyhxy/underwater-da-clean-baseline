@@ -16,7 +16,7 @@ def main():
 
     rows = []
     fieldnames = None
-    for manifest in args.manifests:
+    for source_index, manifest in enumerate(args.manifests):
         manifest = manifest.expanduser().resolve()
         with manifest.open("r", newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
@@ -27,7 +27,7 @@ def main():
             scene_name = manifest.parent.name
             for row in reader:
                 row = dict(row)
-                row["window"] = f"{scene_name}/{row['window']}"
+                row["window"] = f"scene_{source_index:04d}/{scene_name}/{row['window']}"
                 for key in PATH_COLUMNS:
                     path = Path(row[key]).expanduser()
                     if not path.is_absolute():
