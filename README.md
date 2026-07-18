@@ -301,3 +301,49 @@ VAL_LIST=/path/to/flsea_val.txt \
 EXP_NAME=baseline_seed42 \
 bash scripts/train_flsea_baseline.sh
 ```
+
+### Wat3R privileged multi-view distillation
+
+Wat3R is an offline training-only teacher. Each 24-frame package keeps depth,
+confidence, intrinsics, and extrinsics from the same forward pass so that its
+geometry gauge is internally consistent. The DA2 student still processes every
+view independently and remains single-image-only at inference.
+
+Generate one scene at a time:
+
+```bash
+SCENE=flatiron \
+IMAGE_DIR=/data1/hxy/DATASET/FLSeaVI/canyons/flatiron/imgs \
+WAT3R_ROOT=/data1/hxy/Wat3R \
+WAT3R_CKPT=/data1/hxy/Wat3R/checkpoints/wat3r.pth \
+bash scripts/generate_flsea_wat3r_teacher.sh
+```
+
+Merge completed scene manifests:
+
+```bash
+python tools/merge_wat3r_manifests.py \
+  --output /data1/hxy/flsea_wat3r_teacher/manifest_all.csv \
+  /data1/hxy/flsea_wat3r_teacher/*/manifest.csv
+```
+
+Audit paths, matching triplets, and static-mask coverage before training:
+
+```bash
+python tools/audit_wat3r_teacher.py \
+  --manifest /data1/hxy/flsea_wat3r_teacher/manifest_all.csv \
+  --train-list /data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/train_half.txt
+```
+
+Start stage two from the matching research-one checkpoint:
+
+```bash
+INIT_FROM=runs/clean_hybrid_lora_aqua_seed42/best_abs_rel.pth \
+WAT3R_MANIFEST=/data1/hxy/flsea_wat3r_teacher/manifest_all.csv \
+bash scripts/train_flsea_wat3r_distill.sh
+```
+
+Supervision precedence is fixed: FLSea GT on observed pixels, reliable Wat3R
+depth only in holes, multi-view reprojection only on static consistent pixels,
+and frozen DA2 gradient preservation everywhere else in holes. Wat3R files are
+never required by evaluation or inference.

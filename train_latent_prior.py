@@ -10,6 +10,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
 from dataset.flsea import FLSea
+from dataset.flsea_wat3r import FLSeaWat3R
 from eval_latent_prior import evaluate_latent_prior, load_file_list
 from models.depth_anything_latent_prior import DepthAnythingLatentPrior
 from train import (
@@ -25,6 +26,11 @@ from train import (
 )
 from util.hole_geometry import hole_geometry_preservation_loss
 from util.utils import init_log
+from util.wat3r_distillation import (
+    build_teacher_reliability_mask,
+    wat3r_hole_distillation_loss,
+    wat3r_multiview_geometry_loss,
+)
 
 
 def save_checkpoint(model, path, args, epoch=None, metrics=None):
@@ -198,6 +204,18 @@ def main():
         default="1,2,4",
         help="Comma-separated pixel offsets used by the affine-invariant hole geometry loss",
     )
+    parser.add_argument(
+        "--wat3r-manifest",
+        default="",
+        help="Offline Wat3R window manifest; empty keeps the original single-frame loader",
+    )
+    parser.add_argument("--wat3r-frame-stride", default=1, type=int)
+    parser.add_argument("--wat3r-hole-weight", default=0.0, type=float)
+    parser.add_argument("--wat3r-hole-grad-weight", default=0.25, type=float)
+    parser.add_argument("--wat3r-mv-weight", default=0.0, type=float)
+    parser.add_argument("--wat3r-confidence-quantile", default=0.6, type=float)
+    parser.add_argument("--wat3r-relative-depth-threshold", default=0.05, type=float)
+    parser.add_argument("--wat3r-min-align-pixels", default=100, type=int)
     parser.add_argument("--consistency-hardness-weight", default=0.0, type=float)
     parser.add_argument("--consistency-hardness-clamp-min", default=0.90, type=float)
     parser.add_argument("--consistency-hardness-clamp-max", default=1.10, type=float)
@@ -241,9 +259,26 @@ def main():
         logger.warning(
             "Hole geometry reference is only immutable when both backbone and base head are frozen"
         )
+    if args.wat3r_hole_weight < 0 or args.wat3r_mv_weight < 0:
+        raise ValueError("Wat3R loss weights must be non-negative")
+    if not 0.0 <= args.wat3r_confidence_quantile <= 1.0:
+        raise ValueError("--wat3r-confidence-quantile must be in [0, 1]")
+    if args.wat3r_frame_stride <= 0:
+        raise ValueError("--wat3r-frame-stride must be positive")
+    use_wat3r = bool(args.wat3r_manifest)
+    if (args.wat3r_hole_weight > 0 or args.wat3r_mv_weight > 0) and not use_wat3r:
+        raise ValueError("Wat3R losses require --wat3r-manifest")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_set = FLSea(args.train_list, "train", size=(args.img_size, args.img_size))
+    if use_wat3r:
+        train_set = FLSeaWat3R(
+            args.train_list,
+            args.wat3r_manifest,
+            size=(args.img_size, args.img_size),
+            frame_stride=args.wat3r_frame_stride,
+        )
+    else:
+        train_set = FLSea(args.train_list, "train", size=(args.img_size, args.img_size))
     val_pairs = load_file_list(args.val_list)
     loader_generator = torch.Generator()
     loader_generator.manual_seed(args.seed)
@@ -373,6 +408,17 @@ def main():
             ",".join(str(scale) for scale in hole_geometry_scales),
         )
     )
+    logger.info(
+        "Wat3R privileged geometry: enabled=%s hole_weight=%.4f mv_weight=%.4f "
+        "conf_quantile=%.3f frame_stride=%d"
+        % (
+            str(use_wat3r),
+            args.wat3r_hole_weight,
+            args.wat3r_mv_weight,
+            args.wat3r_confidence_quantile,
+            args.wat3r_frame_stride,
+        )
+    )
     logger.info("Numerics: amp=%s grad_clip=%.4f" % (str(amp_enabled), args.grad_clip))
 
     best_abs_rel = float("inf")
@@ -402,7 +448,18 @@ def main():
         for step, sample in enumerate(train_loader):
             if epoch == 0 and step == 0:
                 logger.info("First training batch: %s" % ", ".join(sample["image_path"]))
-            image = sample["image"].to(device, non_blocking=True)
+            if use_wat3r:
+                images = sample["images"].to(device, non_blocking=True)
+                batch_size, num_views = images.shape[:2]
+                image = images[:, 1]
+                teacher_depth_views = sample["teacher_depth"].to(device, non_blocking=True)
+                teacher_confidence_views = sample["teacher_confidence"].to(device, non_blocking=True)
+                teacher_static_views = sample["teacher_static_mask"].to(device, non_blocking=True).bool()
+                teacher_intrinsics = sample["intrinsics"].to(device, non_blocking=True)
+                teacher_extrinsics = sample["extrinsics"].to(device, non_blocking=True)
+            else:
+                image = sample["image"].to(device, non_blocking=True)
+                images = None
             depth = sample["depth"].to(device, non_blocking=True)
             observed_mask = sample["valid_mask"].to(device, non_blocking=True).bool()
             valid_mask = observed_mask & (depth >= args.min_depth) & (depth <= args.max_depth)
@@ -410,8 +467,20 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
                 need_base_reference = args.gauge_anchor_weight > 0 or args.hole_geometry_weight > 0
+                model_input = images.flatten(0, 1) if use_wat3r else image
                 if need_base_reference:
-                    pred_disp, base_disp = model(image, return_base=True)
+                    prediction_output, base_output = model(model_input, return_base=True)
+                    if use_wat3r:
+                        pred_disp_views = prediction_output.reshape(
+                            batch_size, num_views, *prediction_output.shape[-2:]
+                        )
+                        base_disp_views = base_output.reshape(
+                            batch_size, num_views, *base_output.shape[-2:]
+                        )
+                        pred_disp = pred_disp_views[:, 1]
+                        base_disp = base_disp_views[:, 1]
+                    else:
+                        pred_disp, base_disp = prediction_output, base_output
                     if args.gauge_anchor_weight > 0:
                         loss_gauge = raw_disparity_gauge_loss(pred_disp, base_disp)
                     else:
@@ -426,9 +495,68 @@ def main():
                     else:
                         loss_hole_geometry = pred_disp.new_zeros(())
                 else:
-                    pred_disp = model(image)
+                    prediction_output = model(model_input)
+                    if use_wat3r:
+                        pred_disp_views = prediction_output.reshape(
+                            batch_size, num_views, *prediction_output.shape[-2:]
+                        )
+                        pred_disp = pred_disp_views[:, 1]
+                    else:
+                        pred_disp = prediction_output
                     loss_gauge = pred_disp.new_zeros(())
                     loss_hole_geometry = pred_disp.new_zeros(())
+
+                if use_wat3r:
+                    teacher_reliable_views = build_teacher_reliability_mask(
+                        teacher_depth_views.flatten(0, 1),
+                        teacher_confidence_views.flatten(0, 1),
+                        teacher_static_views.flatten(0, 1),
+                        confidence_quantile=args.wat3r_confidence_quantile,
+                    ).reshape(batch_size, num_views, *teacher_depth_views.shape[-2:])
+                    if args.wat3r_hole_weight > 0:
+                        wat3r_hole = wat3r_hole_distillation_loss(
+                            pred_disp,
+                            teacher_depth_views[:, 1],
+                            depth,
+                            observed_mask,
+                            teacher_reliable_views[:, 1],
+                            gradient_scales=hole_geometry_scales,
+                            gradient_weight=args.wat3r_hole_grad_weight,
+                            min_align_pixels=args.wat3r_min_align_pixels,
+                        )
+                    else:
+                        wat3r_hole = {
+                            "loss": pred_disp.new_zeros(()),
+                            "value": pred_disp.new_zeros(()),
+                            "gradient": pred_disp.new_zeros(()),
+                            "coverage": pred_disp.new_zeros(()),
+                        }
+                    if args.wat3r_mv_weight > 0:
+                        wat3r_mv = wat3r_multiview_geometry_loss(
+                            pred_disp_views,
+                            teacher_depth_views,
+                            teacher_reliable_views,
+                            teacher_intrinsics,
+                            teacher_extrinsics,
+                            relative_depth_threshold=args.wat3r_relative_depth_threshold,
+                            min_align_pixels=args.wat3r_min_align_pixels,
+                        )
+                    else:
+                        wat3r_mv = {
+                            "loss": pred_disp.new_zeros(()),
+                            "coverage": pred_disp.new_zeros(()),
+                        }
+                else:
+                    wat3r_hole = {
+                        "loss": pred_disp.new_zeros(()),
+                        "value": pred_disp.new_zeros(()),
+                        "gradient": pred_disp.new_zeros(()),
+                        "coverage": pred_disp.new_zeros(()),
+                    }
+                    wat3r_mv = {
+                        "loss": pred_disp.new_zeros(()),
+                        "coverage": pred_disp.new_zeros(()),
+                    }
                 sup_weight = valid_mask.float()
 
                 if args.consistency_hardness_weight > 0 and random.random() < args.consistency_aug_prob:
@@ -472,6 +600,8 @@ def main():
                     + args.grad_weight * loss_grad
                     + args.gauge_anchor_weight * loss_gauge
                     + args.hole_geometry_weight * loss_hole_geometry
+                    + args.wat3r_hole_weight * wat3r_hole["loss"]
+                    + args.wat3r_mv_weight * wat3r_mv["loss"]
                 )
 
             if not torch.isfinite(loss):
@@ -492,7 +622,7 @@ def main():
 
             if step % args.log_interval == 0:
                 logger.info(
-                    "Epoch %02d Iter %04d/%04d Step %06d Loss=%.6f L1=%.6f SiLog=%.6f Metric=%.6f Grad=%.6f Gauge=%.6f HoleGeom=%.6f HoleRatio=%.4f HardMean=%.6f LR=%.2e"
+                    "Epoch %02d Iter %04d/%04d Step %06d Loss=%.6f L1=%.6f SiLog=%.6f Metric=%.6f Grad=%.6f Gauge=%.6f HoleGeom=%.6f WatHole=%.6f WatHoleCov=%.4f WatMV=%.6f WatMVCov=%.4f HoleRatio=%.4f HardMean=%.6f LR=%.2e"
                     % (
                         epoch + 1,
                         step,
@@ -505,6 +635,10 @@ def main():
                         loss_grad.item(),
                         loss_gauge.item(),
                         loss_hole_geometry.item(),
+                        wat3r_hole["loss"].item(),
+                        wat3r_hole["coverage"].item(),
+                        wat3r_mv["loss"].item(),
+                        wat3r_mv["coverage"].item(),
                         (~observed_mask).float().mean().item(),
                         cons_map.mean().item(),
                         optimizer.param_groups[0]["lr"],
