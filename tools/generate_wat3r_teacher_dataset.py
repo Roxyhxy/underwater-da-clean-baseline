@@ -10,6 +10,15 @@ from pathlib import Path
 
 
 PATH_COLUMNS = ("image", "teacher_depth", "teacher_confidence", "static_mask", "camera")
+REQUIRED_COLUMNS = {
+    "window",
+    "local_index",
+    "image",
+    "teacher_depth",
+    "teacher_confidence",
+    "static_mask",
+    "camera",
+}
 
 
 def parse_args():
@@ -47,6 +56,28 @@ def scene_key(image_path, dataset_root):
     except ValueError as error:
         raise ValueError(f"Image is outside --dataset-root: {image_path}") from error
     return relative
+
+
+def valid_manifest(path):
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    try:
+        with path.open("r", newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            if not REQUIRED_COLUMNS.issubset(reader.fieldnames or ()):
+                return False
+            first = next(reader, None)
+    except (OSError, csv.Error):
+        return False
+    if first is None:
+        return False
+    for key in PATH_COLUMNS:
+        value = Path(first[key]).expanduser()
+        if not value.is_absolute():
+            value = path.parent / value
+        if not value.is_file() or value.stat().st_size == 0:
+            return False
+    return True
 
 
 def merge_manifests(manifests, output_path):
@@ -111,10 +142,12 @@ def main():
         scene_output = output_root / key
         manifest = scene_output / "manifest.csv"
         print(f"[{scene_index + 1}/{len(grouped_images)}] {key}: {len(images)} train frames")
-        if manifest.exists() and not args.overwrite:
+        if valid_manifest(manifest) and not args.overwrite:
             print(f"  Reusing existing manifest: {manifest}")
             manifests.append(manifest)
             continue
+        if manifest.exists() and not args.overwrite:
+            print(f"  Existing manifest is incomplete; regenerating: {manifest}")
         command = [
             sys.executable,
             str(generator),
@@ -151,7 +184,9 @@ def main():
         manifests.append(manifest)
 
     merged_manifest = output_root / "manifest_all.csv"
-    merge_manifests(manifests, merged_manifest)
+    temporary_manifest = merged_manifest.with_suffix(".csv.tmp")
+    merge_manifests(manifests, temporary_manifest)
+    temporary_manifest.replace(merged_manifest)
     print("Teacher dataset generation complete")
     print(f"Merged manifest: {merged_manifest}")
 

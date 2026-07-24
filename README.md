@@ -352,11 +352,45 @@ python tools/audit_wat3r_teacher.py \
   --train-list /data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/train_half.txt
 ```
 
+Do not train directly from the raw Wat3R manifest. Build cross-window agreement
+masks first. They align the relative disparities of repeated predictions for
+the same frame and retain only pixels supported by at least two overlapping
+windows.
+
+For the completed `flatiron` pilot:
+
+```bash
+TRAIN_LIST=/data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/train.txt \
+bash scripts/prepare_flsea_wat3r_pilot.sh
+```
+
+This writes `canyons/flatiron/manifest_overlap.csv`. Run a one-epoch,
+single-scene smoke test before spending time on every scene:
+
+```bash
+INIT_FROM=runs/clean_hybrid_lora_aqua_seed42/best_abs_rel.pth \
+TRAIN_LIST=/data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/train.txt \
+bash scripts/train_flsea_wat3r_pilot.sh
+```
+
+After every training scene has been generated, build and audit the formal
+all-scene overlap manifest:
+
+```bash
+TRAIN_LIST=/data1/hxy/DPV2_prompt_fusion/dataset/splits/flsea/train.txt \
+bash scripts/prepare_flsea_wat3r_all.sh
+```
+
+The final teacher reliability rule is finite depth intersected with Wat3R
+static consistency, the selected confidence quantile, cross-window agreement,
+and the FLSea GT hole. Frames seen by only one window receive an empty overlap
+mask instead of unverified pseudo-labels.
+
 Start stage two from the matching research-one checkpoint:
 
 ```bash
 INIT_FROM=runs/clean_hybrid_lora_aqua_seed42/best_abs_rel.pth \
-WAT3R_MANIFEST=/data1/hxy/flsea_wat3r_train_teacher/manifest_all.csv \
+WAT3R_MANIFEST=/data1/hxy/flsea_wat3r_train_teacher/manifest_all_overlap.csv \
 bash scripts/train_flsea_wat3r_distill.sh
 ```
 

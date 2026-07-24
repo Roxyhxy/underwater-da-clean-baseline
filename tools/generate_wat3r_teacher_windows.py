@@ -247,7 +247,8 @@ def main():
             torch.cuda.empty_cache()
 
     manifest_path = args.output_dir / "manifest.csv"
-    with manifest_path.open("w", newline="", encoding="utf-8") as handle:
+    temporary_manifest = manifest_path.with_suffix(".csv.tmp")
+    with temporary_manifest.open("w", newline="", encoding="utf-8") as handle:
         fieldnames = [
             "window",
             "local_index",
@@ -263,6 +264,7 @@ def main():
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(manifest_rows)
+    temporary_manifest.replace(manifest_path)
     print(f"Saved {len(manifest_rows)} window-frame labels to {manifest_path}")
 
 

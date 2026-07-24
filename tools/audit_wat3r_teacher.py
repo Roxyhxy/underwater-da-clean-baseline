@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--train-list", required=True, type=Path)
     parser.add_argument("--max-frames", default=300, type=int)
     parser.add_argument("--frame-stride", default=1, type=int)
+    parser.add_argument("--require-overlap", action="store_true")
     args = parser.parse_args()
 
     train_images = set()
@@ -65,25 +66,53 @@ def main():
 
     depth_coverages = []
     static_coverages = []
+    overlap_coverages = []
+    reliable_coverages = []
     confidence_values = []
     shape_errors = 0
     for row in audit_rows:
         depth_path = resolve(row["teacher_depth"], manifest.parent)
         confidence_path = resolve(row["teacher_confidence"], manifest.parent)
         static_path = resolve(row["static_mask"], manifest.parent)
+        overlap_path = (
+            resolve(row["overlap_mask"], manifest.parent)
+            if row.get("overlap_mask")
+            else None
+        )
         depth = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
         confidence = cv2.imread(str(confidence_path), cv2.IMREAD_UNCHANGED)
         static = cv2.imread(str(static_path), cv2.IMREAD_UNCHANGED)
+        overlap = (
+            cv2.imread(str(overlap_path), cv2.IMREAD_UNCHANGED)
+            if overlap_path is not None
+            else None
+        )
         if depth is None or confidence is None or static is None:
             raise FileNotFoundError(f"Unreadable teacher row: {row}")
+        if args.require_overlap and overlap is None:
+            raise FileNotFoundError(f"Unreadable overlap mask: {overlap_path}")
         if depth.shape[:2] != confidence.shape[:2] or depth.shape[:2] != static.shape[:2]:
+            shape_errors += 1
+            continue
+        if overlap is not None and overlap.shape[:2] != depth.shape[:2]:
             shape_errors += 1
             continue
         valid = np.isfinite(depth) & (depth > 0)
         static_valid = valid & (static > 0)
+        overlap_valid = (
+            static_valid & (overlap > 0) if overlap is not None else static_valid
+        )
         depth_coverages.append(valid.mean())
         static_coverages.append(static_valid.mean())
-        confidence_values.append(confidence[static_valid & np.isfinite(confidence)])
+        overlap_coverages.append(overlap_valid.mean())
+        finite_static_confidence = static_valid & np.isfinite(confidence)
+        finite_confidence = overlap_valid & np.isfinite(confidence)
+        if finite_static_confidence.any():
+            cutoff = np.quantile(confidence[finite_static_confidence], 0.6)
+            reliable_coverages.append(
+                (finite_confidence & (confidence >= cutoff)).mean()
+            )
+        confidence_values.append(confidence[finite_confidence])
 
     confidence_values = [values for values in confidence_values if values.size]
     confidence_values = np.concatenate(confidence_values) if confidence_values else np.array([])
@@ -94,6 +123,9 @@ def main():
     print(f"available training triplets (duplicates across windows included): {triplets}")
     print(f"teacher valid coverage mean: {np.mean(depth_coverages):.4f}")
     print(f"static coverage mean: {np.mean(static_coverages):.4f}")
+    print(f"static + overlap coverage mean: {np.mean(overlap_coverages):.4f}")
+    reliable_mean = np.mean(reliable_coverages) if reliable_coverages else 0.0
+    print(f"estimated final reliable coverage mean: {reliable_mean:.4f}")
     print(f"shape errors: {shape_errors}")
     if confidence_values.size:
         values = np.percentile(confidence_values, [10, 50, 90])

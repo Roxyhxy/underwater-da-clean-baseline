@@ -214,6 +214,11 @@ def main():
     parser.add_argument("--wat3r-hole-grad-weight", default=0.25, type=float)
     parser.add_argument("--wat3r-mv-weight", default=0.0, type=float)
     parser.add_argument("--wat3r-confidence-quantile", default=0.6, type=float)
+    parser.add_argument(
+        "--wat3r-require-overlap",
+        action="store_true",
+        help="Require and apply cross-window Wat3R agreement masks",
+    )
     parser.add_argument("--wat3r-relative-depth-threshold", default=0.05, type=float)
     parser.add_argument("--wat3r-min-align-pixels", default=100, type=int)
     parser.add_argument("--consistency-hardness-weight", default=0.0, type=float)
@@ -276,6 +281,7 @@ def main():
             args.wat3r_manifest,
             size=(args.img_size, args.img_size),
             frame_stride=args.wat3r_frame_stride,
+            require_overlap=args.wat3r_require_overlap,
         )
     else:
         train_set = FLSea(args.train_list, "train", size=(args.img_size, args.img_size))
@@ -455,6 +461,9 @@ def main():
                 teacher_depth_views = sample["teacher_depth"].to(device, non_blocking=True)
                 teacher_confidence_views = sample["teacher_confidence"].to(device, non_blocking=True)
                 teacher_static_views = sample["teacher_static_mask"].to(device, non_blocking=True).bool()
+                teacher_overlap_views = sample["teacher_overlap_mask"].to(
+                    device, non_blocking=True
+                ).bool()
                 teacher_intrinsics = sample["intrinsics"].to(device, non_blocking=True)
                 teacher_extrinsics = sample["extrinsics"].to(device, non_blocking=True)
             else:
@@ -513,6 +522,10 @@ def main():
                         teacher_static_views.flatten(0, 1),
                         confidence_quantile=args.wat3r_confidence_quantile,
                     ).reshape(batch_size, num_views, *teacher_depth_views.shape[-2:])
+                    if args.wat3r_require_overlap:
+                        teacher_reliable_views = (
+                            teacher_reliable_views & teacher_overlap_views
+                        )
                     if args.wat3r_hole_weight > 0:
                         wat3r_hole = wat3r_hole_distillation_loss(
                             pred_disp,

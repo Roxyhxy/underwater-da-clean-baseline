@@ -27,7 +27,14 @@ def _resolve_path(value, manifest_dir):
 class FLSeaWat3R(Dataset):
     """FLSea center-frame supervision with privileged Wat3R window geometry."""
 
-    def __init__(self, filelist_path, teacher_manifest, size=(518, 518), frame_stride=1):
+    def __init__(
+        self,
+        filelist_path,
+        teacher_manifest,
+        size=(518, 518),
+        frame_stride=1,
+        require_overlap=False,
+    ):
         if frame_stride <= 0:
             raise ValueError("frame_stride must be positive")
         self.size = tuple(size)
@@ -62,11 +69,21 @@ class FLSeaWat3R(Dataset):
             missing = required - set(reader.fieldnames or ())
             if missing:
                 raise ValueError(f"Wat3R manifest is missing columns: {sorted(missing)}")
+            if require_overlap and "overlap_mask" not in set(reader.fieldnames or ()):
+                raise ValueError(
+                    "Wat3R overlap filtering requires a manifest containing overlap_mask"
+                )
             for row in reader:
                 record = dict(row)
                 record["local_index"] = int(record["local_index"])
                 for key in ("image", "teacher_depth", "teacher_confidence", "static_mask", "camera"):
                     record[key] = _resolve_path(record[key], manifest_dir)
+                if record.get("overlap_mask"):
+                    record["overlap_mask"] = _resolve_path(
+                        record["overlap_mask"], manifest_dir
+                    )
+                elif require_overlap:
+                    raise ValueError(f"Missing overlap mask for {record['image']}")
                 groups[record["window"]].append(record)
 
         self.samples = []
@@ -129,6 +146,7 @@ class FLSeaWat3R(Dataset):
         teacher_depths = []
         teacher_confidences = []
         static_masks = []
+        overlap_masks = []
         intrinsics = []
         extrinsics = []
 
@@ -141,7 +159,16 @@ class FLSeaWat3R(Dataset):
             depth = self._read_map(view["teacher_depth"], "teacher depth")
             confidence = self._read_map(view["teacher_confidence"], "teacher confidence")
             static = self._read_map(view["static_mask"], "static mask") > 0
-            if image.shape[:2] != depth.shape or depth.shape != confidence.shape or depth.shape != static.shape:
+            if view.get("overlap_mask"):
+                overlap = self._read_map(view["overlap_mask"], "overlap mask") > 0
+            else:
+                overlap = np.ones_like(static, dtype=bool)
+            if (
+                image.shape[:2] != depth.shape
+                or depth.shape != confidence.shape
+                or depth.shape != static.shape
+                or depth.shape != overlap.shape
+            ):
                 raise ValueError(f"Teacher maps do not match RGB shape for {view['image']}")
             if original_shape is None:
                 original_shape = image.shape[:2]
@@ -152,6 +179,7 @@ class FLSeaWat3R(Dataset):
             teacher_depths.append(depth)
             teacher_confidences.append(confidence)
             static_masks.append(static)
+            overlap_masks.append(overlap)
             intrinsics.append(np.asarray(camera["intrinsics"], dtype=np.float32))
             extrinsics.append(np.asarray(camera["extrinsics"], dtype=np.float32))
 
@@ -174,12 +202,14 @@ class FLSeaWat3R(Dataset):
         transformed_depths = []
         transformed_confidences = []
         transformed_static = []
+        transformed_overlap = []
         transformed_intrinsics = []
-        for image, depth, confidence, static, intrinsic in zip(
+        for image, depth, confidence, static, overlap, intrinsic in zip(
             raw_images,
             teacher_depths,
             teacher_confidences,
             static_masks,
+            overlap_masks,
             intrinsics,
         ):
             image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_CUBIC)[crop]
@@ -189,6 +219,11 @@ class FLSeaWat3R(Dataset):
             )[crop]
             static = cv2.resize(
                 static.astype(np.uint8),
+                (new_width, new_height),
+                interpolation=cv2.INTER_NEAREST,
+            )[crop]
+            overlap = cv2.resize(
+                overlap.astype(np.uint8),
                 (new_width, new_height),
                 interpolation=cv2.INTER_NEAREST,
             )[crop]
@@ -204,6 +239,7 @@ class FLSeaWat3R(Dataset):
             transformed_depths.append(np.ascontiguousarray(depth.astype(np.float32)))
             transformed_confidences.append(np.ascontiguousarray(confidence.astype(np.float32)))
             transformed_static.append(np.ascontiguousarray(static.astype(bool)))
+            transformed_overlap.append(np.ascontiguousarray(overlap.astype(bool)))
             transformed_intrinsics.append(intrinsic)
 
         gt_depth = cv2.resize(
@@ -220,6 +256,7 @@ class FLSeaWat3R(Dataset):
             "teacher_depth": torch.from_numpy(np.stack(transformed_depths)),
             "teacher_confidence": torch.from_numpy(np.stack(transformed_confidences)),
             "teacher_static_mask": torch.from_numpy(np.stack(transformed_static)),
+            "teacher_overlap_mask": torch.from_numpy(np.stack(transformed_overlap)),
             "intrinsics": torch.from_numpy(np.stack(transformed_intrinsics)),
             "extrinsics": torch.from_numpy(np.stack(extrinsics).astype(np.float32)),
             "image_path": entry["views"][1]["image"],
