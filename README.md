@@ -386,15 +386,56 @@ static consistency, the selected confidence quantile, cross-window agreement,
 and the FLSea GT hole. Frames seen by only one window receive an empty overlap
 mask instead of unverified pseudo-labels.
 
-Start stage two from the matching research-one checkpoint:
+Calibrate confidence and overlap reliability against the valid FLSea GT region
+before selecting the training threshold:
 
 ```bash
-INIT_FROM=runs/clean_hybrid_lora_aqua_seed42/best_abs_rel.pth \
 WAT3R_MANIFEST=/data1/hxy/flsea_wat3r_train_teacher/manifest_all_overlap.csv \
-bash scripts/train_flsea_wat3r_distill.sh
+bash scripts/calibrate_flsea_wat3r_teacher.sh
 ```
 
-Supervision precedence is fixed: FLSea GT on observed pixels, reliable Wat3R
-depth only in holes, multi-view reprojection only on static consistent pixels,
-and frozen DA2 gradient preservation everywhere else in holes. Wat3R files are
-never required by evaluation or inference.
+The CSV compares confidence quantiles with and without overlap filtering. Set
+`CONFIDENCE_QUANTILE` to a point that improves teacher error without collapsing
+reliable-hole coverage.
+
+Stage two uses an independent zero-initialized geometry adapter. The complete
+Stage-1 latent prior and degradation-gated LoRA are loaded from `INIT_FROM` and
+frozen. The adapter is trained with valid GT plus optional privileged Wat3R
+geometry; inference remains single-image-only.
+
+Run four matched ablations:
+
+```bash
+bash scripts/train_flsea_wat3r_geometry_ablation.sh control
+bash scripts/train_flsea_wat3r_geometry_ablation.sh hole
+bash scripts/train_flsea_wat3r_geometry_ablation.sh mv
+bash scripts/train_flsea_wat3r_geometry_ablation.sh full
+```
+
+`control` proves whether gains come only from the added adapter parameters.
+`hole` isolates reliable pseudo-depth in GT holes, `mv` isolates temporal
+reprojection, and `full` combines them. Images with fewer than 256 reliable
+hole pixels skip the hole loss. Remaining supervision is concentrated on hole
+boundaries and the far-depth portion instead of ordinary observed pixels.
+
+Evaluate the proxies that ordinary GT metrics cannot see:
+
+```bash
+bash scripts/eval_flsea_wat3r_geometry.sh control
+bash scripts/eval_flsea_wat3r_geometry.sh hole
+bash scripts/eval_flsea_wat3r_geometry.sh mv
+bash scripts/eval_flsea_wat3r_geometry.sh full
+```
+
+Compare lower `hole_teacher_value`, `hole_teacher_gradient`,
+`temporal_reprojection`, and `edge_mae`, together with higher `edge_f1`.
+Report normal FLSea GT metrics separately:
+
+```bash
+bash scripts/eval_flsea_wat3r_geometry_gt.sh control
+bash scripts/eval_flsea_wat3r_geometry_gt.sh hole
+bash scripts/eval_flsea_wat3r_geometry_gt.sh mv
+SAVE_RAW_DISPARITY=true bash scripts/eval_flsea_wat3r_geometry_gt.sh full
+```
+
+Wat3R files are never required by final single-image inference.

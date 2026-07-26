@@ -78,6 +78,44 @@ class PlainResidualConvAdapter(nn.Module):
         return feat + self.body(feat)
 
 
+class GeometryResidualAdapter(nn.Module):
+    """Zero-initialized image-guided residual on top of a frozen Stage-1 disparity."""
+
+    def __init__(self, hidden_channels=32, residual_scale=0.1):
+        super().__init__()
+        self.residual_scale = float(residual_scale)
+        self.body = nn.Sequential(
+            nn.Conv2d(4, hidden_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(
+                hidden_channels,
+                hidden_channels,
+                kernel_size=3,
+                padding=1,
+                groups=hidden_channels,
+            ),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, 1, kernel_size=3, padding=1),
+        )
+        nn.init.zeros_(self.body[-1].weight)
+        nn.init.zeros_(self.body[-1].bias)
+
+    def forward(self, image, disparity):
+        if disparity.ndim == 3:
+            disparity = disparity[:, None]
+        if image.shape[-2:] != disparity.shape[-2:]:
+            image = F.interpolate(
+                image, size=disparity.shape[-2:], mode="bilinear", align_corners=False
+            )
+        scale = disparity.detach().mean(dim=(-2, -1), keepdim=True).clamp_min(1e-3)
+        normalized_disparity = disparity.detach() / scale
+        residual = torch.tanh(self.body(torch.cat((image, normalized_disparity), dim=1)))
+        corrected = disparity + self.residual_scale * scale * residual
+        return corrected.clamp_min(0.0)
+
+
 class LatentPriorDPTHead(nn.Module):
     """Depth head with latent-prior bottleneck modulation and explicit deg-map fusion."""
 
@@ -363,6 +401,9 @@ class DepthAnythingLatentPrior(nn.Module):
         encoder_lora_alpha=16.0,
         encoder_lora_dropout=0.0,
         encoder_lora_last_n_blocks=12,
+        use_geometry_adapter=False,
+        geometry_adapter_hidden=32,
+        geometry_adapter_scale=0.1,
     ):
         super().__init__()
         self.intermediate_layer_idx = {
@@ -379,6 +420,7 @@ class DepthAnythingLatentPrior(nn.Module):
         self.use_deg_map = bool(use_deg_map)
         self.deg_map_spatial_mean = bool(deg_map_spatial_mean)
         self.use_plain_adapter = bool(use_plain_adapter)
+        self.use_geometry_adapter = bool(use_geometry_adapter)
         self.use_encoder_lora = bool(use_encoder_lora)
         self.encoder_lora_mode = str(encoder_lora_mode)
         if encoder_lora_condition_source not in {"fused", "fft"}:
@@ -430,6 +472,14 @@ class DepthAnythingLatentPrior(nn.Module):
             use_plain_adapter=self.use_plain_adapter,
             adapter_hidden=adapter_hidden,
         )
+        self.geometry_adapter = (
+            GeometryResidualAdapter(
+                hidden_channels=geometry_adapter_hidden,
+                residual_scale=geometry_adapter_scale,
+            )
+            if self.use_geometry_adapter
+            else None
+        )
 
     def load_base_weights(self, state_dict, strict=False):
         own_state = self.state_dict()
@@ -441,6 +491,7 @@ class DepthAnythingLatentPrior(nn.Module):
             "depth_head.prior_to_feat.",
             "depth_head.scalar_gate_logits",
             "depth_head.plain_adapters.",
+            "geometry_adapter.",
         )
         for key, value in state_dict.items():
             if key.startswith("module."):
@@ -515,6 +566,14 @@ class DepthAnythingLatentPrior(nn.Module):
 
     def unfreeze_latent_prior_encoder(self):
         for param in self.latent_prior_encoder.parameters():
+            param.requires_grad = True
+
+    def freeze_all_except_geometry_adapter(self):
+        if self.geometry_adapter is None:
+            raise ValueError("Geometry-adapter-only training requires use_geometry_adapter=True")
+        for param in self.parameters():
+            param.requires_grad = False
+        for param in self.geometry_adapter.parameters():
             param.requires_grad = True
 
     @staticmethod
@@ -647,8 +706,14 @@ class DepthAnythingLatentPrior(nn.Module):
             )
             if return_aux:
                 pred, aux = depth
+                stage1_prediction = pred
+                if self.geometry_adapter is not None:
+                    pred = self.geometry_adapter(image, pred)
+                    aux["stage1_prediction"] = stage1_prediction
                 aux["base_prediction"] = base_depth
                 return pred.squeeze(1), aux
+            if self.geometry_adapter is not None:
+                depth = self.geometry_adapter(image, depth)
             return depth.squeeze(1), base_depth.squeeze(1)
 
         depth = self.depth_head(
@@ -662,10 +727,17 @@ class DepthAnythingLatentPrior(nn.Module):
         )
         if return_aux:
             pred, aux = depth
+            if self.geometry_adapter is not None:
+                aux["stage1_prediction"] = pred
+                pred = self.geometry_adapter(image, pred)
             return pred.squeeze(1), aux
         if return_base:
             pred, base_pred = depth
+            if self.geometry_adapter is not None:
+                pred = self.geometry_adapter(image, pred)
             return pred.squeeze(1), base_pred.squeeze(1)
+        if self.geometry_adapter is not None:
+            depth = self.geometry_adapter(image, depth)
         return depth.squeeze(1)
 
     @torch.no_grad()

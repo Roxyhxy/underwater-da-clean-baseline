@@ -71,6 +71,76 @@ def build_teacher_reliability_mask(
     return valid & (teacher_confidence >= cutoff[:, None, None].to(teacher_confidence.dtype))
 
 
+def _masked_quantile(values, mask, quantile):
+    masked = values.masked_fill(~mask, float("nan")).flatten(1)
+    cutoff = torch.nanquantile(masked.float(), float(quantile), dim=1)
+    return torch.where(
+        torch.isfinite(cutoff),
+        cutoff,
+        torch.full_like(cutoff, float("inf")),
+    )
+
+
+def build_hole_focus_weight(
+    observed_mask,
+    gt_depth,
+    aligned_teacher_disparity,
+    hole_mask,
+    boundary_radius=5,
+    boundary_weight=2.0,
+    far_quantile=0.7,
+    far_weight=2.0,
+):
+    """Emphasize hole interiors near observed boundaries and likely far geometry."""
+    if boundary_radius < 0:
+        raise ValueError("boundary_radius must be non-negative")
+    if boundary_weight < 1 or far_weight < 1:
+        raise ValueError("focus weights must be at least 1")
+    if not 0.0 <= far_quantile <= 1.0:
+        raise ValueError("far_quantile must be in [0, 1]")
+
+    observed_mask = _as_bhw(observed_mask).bool()
+    gt_depth = _as_bhw(gt_depth).float()
+    aligned_teacher_disparity = _as_bhw(aligned_teacher_disparity).float()
+    hole_mask = _as_bhw(hole_mask).bool()
+
+    if boundary_radius > 0:
+        kernel = 2 * int(boundary_radius) + 1
+        near_observed = (
+            F.max_pool2d(
+                observed_mask[:, None].float(),
+                kernel_size=kernel,
+                stride=1,
+                padding=boundary_radius,
+            )[:, 0]
+            > 0
+        )
+        boundary_mask = hole_mask & near_observed
+    else:
+        boundary_mask = torch.zeros_like(hole_mask)
+
+    gt_valid = observed_mask & torch.isfinite(gt_depth) & (gt_depth > 0)
+    far_cutoff = _masked_quantile(gt_depth, gt_valid, far_quantile)
+    aligned_teacher_depth = torch.where(
+        aligned_teacher_disparity > 1e-6,
+        aligned_teacher_disparity.clamp_min(1e-6).reciprocal(),
+        torch.zeros_like(aligned_teacher_disparity),
+    )
+    far_mask = (
+        hole_mask
+        & torch.isfinite(aligned_teacher_depth)
+        & (aligned_teacher_depth >= far_cutoff[:, None, None])
+    )
+
+    weight = hole_mask.to(gt_depth.dtype)
+    weight = weight * (
+        1.0
+        + (float(boundary_weight) - 1.0) * boundary_mask.to(weight.dtype)
+        + (float(far_weight) - 1.0) * far_mask.to(weight.dtype)
+    )
+    return weight, boundary_mask, far_mask
+
+
 def wat3r_hole_distillation_loss(
     prediction_disparity,
     teacher_depth,
@@ -80,6 +150,11 @@ def wat3r_hole_distillation_loss(
     gradient_scales=(1, 2, 4),
     gradient_weight=0.25,
     min_align_pixels=100,
+    min_hole_pixels=256,
+    boundary_radius=5,
+    boundary_weight=2.0,
+    far_quantile=0.7,
+    far_weight=2.0,
     charbonnier_eps=1e-3,
 ):
     """Distill Wat3R geometry only into reliable FLSea holes.
@@ -119,11 +194,24 @@ def wat3r_hole_distillation_loss(
         min_pixels=min_align_pixels,
     )
     valid_image = valid_student & valid_teacher
-    hole_mask = (~observed_mask) & teacher_valid & valid_image[:, None, None]
+    candidate_hole_mask = (~observed_mask) & teacher_valid & valid_image[:, None, None]
+    reliable_hole_pixels = candidate_hole_mask.sum(dim=(-2, -1))
+    eligible_image = valid_image & (reliable_hole_pixels >= int(min_hole_pixels))
+    hole_mask = candidate_hole_mask & eligible_image[:, None, None]
+    focus_weight, boundary_mask, far_mask = build_hole_focus_weight(
+        observed_mask,
+        gt_depth,
+        aligned_teacher,
+        hole_mask,
+        boundary_radius=boundary_radius,
+        boundary_weight=boundary_weight,
+        far_quantile=far_quantile,
+        far_weight=far_weight,
+    )
 
     residual = aligned_prediction - aligned_teacher.detach()
     robust = torch.sqrt(residual.square() + charbonnier_eps**2) - charbonnier_eps
-    weight = hole_mask.to(robust.dtype)
+    weight = focus_weight.to(robust.dtype)
     value_loss = (robust * weight).sum() / weight.sum().clamp_min(1.0)
 
     gradient_total = prediction_disparity.new_zeros(())
@@ -135,22 +223,105 @@ def wat3r_hole_distillation_loss(
             continue
         dx = residual[..., scale:] - residual[..., :-scale]
         mask_x = hole_mask[..., scale:] & hole_mask[..., :-scale]
+        weight_x = torch.minimum(weight[..., scale:], weight[..., :-scale])
         dy = residual[..., scale:, :] - residual[..., :-scale, :]
         mask_y = hole_mask[..., scale:, :] & hole_mask[..., :-scale, :]
+        weight_y = torch.minimum(weight[..., scale:, :], weight[..., :-scale, :])
         scale_weight = 1.0 / float(scale)
-        for difference, pair_mask in ((dx, mask_x), (dy, mask_y)):
-            pair_weight = pair_mask.to(difference.dtype) * scale_weight
+        for difference, pair_mask, focus_pair_weight in (
+            (dx, mask_x, weight_x),
+            (dy, mask_y, weight_y),
+        ):
+            pair_weight = (
+                pair_mask.to(difference.dtype)
+                * focus_pair_weight.to(difference.dtype)
+                * scale_weight
+            )
             pair_error = torch.sqrt(difference.square() + charbonnier_eps**2) - charbonnier_eps
             gradient_total = gradient_total + (pair_error * pair_weight).sum()
             gradient_count = gradient_count + pair_weight.sum()
     gradient_loss = gradient_total / gradient_count.clamp_min(1.0)
     loss = value_loss + float(gradient_weight) * gradient_loss
+    all_hole_pixels = (~observed_mask).sum().clamp_min(1)
+    eligible_count = eligible_image.sum()
     return {
         "loss": loss,
         "value": value_loss,
         "gradient": gradient_loss,
         "coverage": hole_mask.float().mean(),
         "pixels": hole_mask.sum(),
+        "hole_ratio": hole_mask.sum().to(loss.dtype) / all_hole_pixels,
+        "eligible_fraction": eligible_count.to(loss.dtype) / max(hole_mask.shape[0], 1),
+        "boundary_coverage": boundary_mask.float().mean(),
+        "far_coverage": far_mask.float().mean(),
+    }
+
+
+def wat3r_hole_edge_metrics(
+    prediction_disparity,
+    teacher_depth,
+    gt_depth,
+    observed_mask,
+    teacher_reliable_mask,
+    min_align_pixels=100,
+    edge_quantile=0.8,
+):
+    """Measure teacher-edge preservation inside reliable GT holes."""
+    prediction_disparity = _as_bhw(prediction_disparity)
+    teacher_depth = _as_bhw(teacher_depth)
+    gt_depth = _as_bhw(gt_depth)
+    observed_mask = _as_bhw(observed_mask).bool()
+    reliable = _as_bhw(teacher_reliable_mask).bool()
+    gt_valid = observed_mask & torch.isfinite(gt_depth) & (gt_depth > 0)
+    teacher_valid = reliable & torch.isfinite(teacher_depth) & (teacher_depth > 0)
+    teacher_disparity = torch.where(
+        teacher_valid,
+        teacher_depth.clamp_min(1e-6).reciprocal(),
+        torch.zeros_like(teacher_depth),
+    )
+    gt_disparity = torch.where(
+        gt_valid,
+        gt_depth.clamp_min(1e-6).reciprocal(),
+        torch.zeros_like(gt_depth),
+    )
+    aligned_prediction, valid_student, _, _ = align_disparity_scale_shift(
+        prediction_disparity, gt_disparity, gt_valid, min_pixels=min_align_pixels
+    )
+    aligned_teacher, valid_teacher, _, _ = align_disparity_scale_shift(
+        teacher_disparity,
+        gt_disparity,
+        gt_valid & teacher_valid,
+        min_pixels=min_align_pixels,
+    )
+    hole = (
+        (~observed_mask)
+        & teacher_valid
+        & valid_student[:, None, None]
+        & valid_teacher[:, None, None]
+    )
+
+    def gradient_magnitude(values):
+        dx = F.pad((values[..., 1:] - values[..., :-1]).abs(), (0, 1, 0, 0))
+        dy = F.pad((values[..., 1:, :] - values[..., :-1, :]).abs(), (0, 0, 0, 1))
+        return dx + dy
+
+    student_gradient = gradient_magnitude(aligned_prediction)
+    teacher_gradient = gradient_magnitude(aligned_teacher)
+    edge_error = (student_gradient - teacher_gradient).abs()
+    edge_mae = (edge_error * hole).sum() / hole.sum().clamp_min(1)
+
+    threshold = _masked_quantile(teacher_gradient, hole, edge_quantile)
+    teacher_edge = hole & (teacher_gradient >= threshold[:, None, None])
+    student_edge = hole & (student_gradient >= threshold[:, None, None])
+    true_positive = (teacher_edge & student_edge).sum().float()
+    precision = true_positive / student_edge.sum().clamp_min(1)
+    recall = true_positive / teacher_edge.sum().clamp_min(1)
+    edge_f1 = 2 * precision * recall / (precision + recall).clamp_min(1e-6)
+    return {
+        "edge_mae": edge_mae,
+        "edge_f1": edge_f1,
+        "edge_pixels": teacher_edge.sum(),
+        "coverage": hole.float().mean(),
     }
 
 
@@ -172,6 +343,7 @@ def wat3r_multiview_geometry_loss(
     teacher_reliable_mask,
     intrinsics,
     extrinsics,
+    source_focus_mask=None,
     relative_depth_threshold=0.05,
     min_align_pixels=100,
     charbonnier_eps=1e-3,
@@ -196,6 +368,12 @@ def wat3r_multiview_geometry_loss(
         raise ValueError("extrinsics must be [B,V,3,4] or [B,V,4,4]")
 
     reliable = teacher_reliable_mask.bool() & torch.isfinite(teacher_depth) & (teacher_depth > 0)
+    if source_focus_mask is None:
+        source_focus = torch.ones_like(reliable)
+    else:
+        if source_focus_mask.shape != reliable.shape:
+            raise ValueError("source_focus_mask must match prediction_disparity")
+        source_focus = source_focus_mask.bool()
     teacher_disparity = torch.where(
         reliable,
         teacher_depth.clamp_min(1e-6).reciprocal(),
@@ -261,6 +439,7 @@ def wat3r_multiview_geometry_loss(
             )
             pair_mask = (
                 reliable[:, ref_idx]
+                & source_focus[:, ref_idx]
                 & sampled_reliable
                 & inside
                 & teacher_consistent

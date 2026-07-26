@@ -34,11 +34,13 @@ class FLSeaWat3R(Dataset):
         size=(518, 518),
         frame_stride=1,
         require_overlap=False,
+        random_crop=True,
     ):
         if frame_stride <= 0:
             raise ValueError("frame_stride must be positive")
         self.size = tuple(size)
         self.frame_stride = int(frame_stride)
+        self.random_crop = bool(random_crop)
         self.gt_by_image = {}
         self.gt_by_stem = defaultdict(list)
         with open(filelist_path, "r", encoding="utf-8") as handle:
@@ -192,8 +194,12 @@ class FLSeaWat3R(Dataset):
         new_height, new_width = self._resize_shape(
             height, width, target_height, target_width
         )
-        crop_y = np.random.randint(0, new_height - target_height + 1)
-        crop_x = np.random.randint(0, new_width - target_width + 1)
+        if self.random_crop:
+            crop_y = np.random.randint(0, new_height - target_height + 1)
+            crop_x = np.random.randint(0, new_width - target_width + 1)
+        else:
+            crop_y = (new_height - target_height) // 2
+            crop_x = (new_width - target_width) // 2
         crop = np.s_[crop_y : crop_y + target_height, crop_x : crop_x + target_width]
         scale_x = new_width / float(width)
         scale_y = new_height / float(height)

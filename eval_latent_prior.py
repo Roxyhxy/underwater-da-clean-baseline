@@ -101,6 +101,9 @@ def load_model(args, device, logger):
         encoder_lora_alpha=args.encoder_lora_alpha,
         encoder_lora_dropout=args.encoder_lora_dropout,
         encoder_lora_last_n_blocks=args.encoder_lora_last_n_blocks,
+        use_geometry_adapter=args.geometry_adapter,
+        geometry_adapter_hidden=args.geometry_adapter_hidden,
+        geometry_adapter_scale=args.geometry_adapter_scale,
     ).to(device)
     model.load_base_weights(base_ckpt, strict=False)
     base_load_stats = model.base_load_stats
@@ -237,6 +240,9 @@ def main():
     )
     parser.add_argument("--plain-adapter", action="store_true")
     parser.add_argument("--adapter-hidden", default=256, type=int)
+    parser.add_argument("--geometry-adapter", action="store_true")
+    parser.add_argument("--geometry-adapter-hidden", default=32, type=int)
+    parser.add_argument("--geometry-adapter-scale", default=0.1, type=float)
     parser.add_argument("--encoder-lora", action="store_true")
     parser.add_argument("--encoder-lora-mode", default="gated", choices=["plain", "gated"])
     parser.add_argument(

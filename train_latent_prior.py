@@ -75,6 +75,7 @@ def summarize_trainable_parameters(model):
         "prior_head": [],
         "encoder_lora": [],
         "plain_adapter": [],
+        "geometry_adapter": [],
         "base_head": [],
         "backbone": [],
     }
@@ -89,6 +90,8 @@ def summarize_trainable_parameters(model):
             summary["latent_prior"].append((name, param))
         elif name.startswith("depth_head.plain_adapters."):
             summary["plain_adapter"].append((name, param))
+        elif name.startswith("geometry_adapter."):
+            summary["geometry_adapter"].append((name, param))
         elif name.startswith("depth_head.global_mod.") or name.startswith("depth_head.deg_map_generator.") or name.startswith(
             "depth_head.prior_to_feat."
         ) or name == "depth_head.scalar_gate_logits":
@@ -108,6 +111,7 @@ def build_optimizer(model, args):
     prior_head_params = [param for _, param in summary["prior_head"]]
     encoder_lora_params = [param for _, param in summary["encoder_lora"]]
     plain_adapter_params = [param for _, param in summary["plain_adapter"]]
+    geometry_adapter_params = [param for _, param in summary["geometry_adapter"]]
     base_head_params = [param for _, param in summary["base_head"]]
     backbone_params = [param for _, param in summary["backbone"]]
 
@@ -119,6 +123,14 @@ def build_optimizer(model, args):
         groups.append({"params": encoder_lora_params, "lr": args.encoder_lora_lr or args.lr, "name": "encoder_lora"})
     if plain_adapter_params:
         groups.append({"params": plain_adapter_params, "lr": args.adapter_lr or args.lr, "name": "plain_adapter"})
+    if geometry_adapter_params:
+        groups.append(
+            {
+                "params": geometry_adapter_params,
+                "lr": args.geometry_adapter_lr or args.lr,
+                "name": "geometry_adapter",
+            }
+        )
     if base_head_params:
         groups.append({"params": base_head_params, "lr": args.head_lr or args.lr, "name": "base_head"})
     if backbone_params:
@@ -141,6 +153,7 @@ def main():
     parser.add_argument("--backbone-lr", default=0.0, type=float)
     parser.add_argument("--encoder-lora-lr", default=0.0, type=float)
     parser.add_argument("--adapter-lr", default=0.0, type=float)
+    parser.add_argument("--geometry-adapter-lr", default=0.0, type=float)
     parser.add_argument("--pretrained-from", required=True)
     parser.add_argument("--init-from", default="")
     parser.add_argument("--save-path", required=True)
@@ -170,6 +183,14 @@ def main():
     )
     parser.add_argument("--plain-adapter", action="store_true")
     parser.add_argument("--adapter-hidden", default=256, type=int)
+    parser.add_argument("--geometry-adapter", action="store_true")
+    parser.add_argument("--geometry-adapter-hidden", default=32, type=int)
+    parser.add_argument("--geometry-adapter-scale", default=0.1, type=float)
+    parser.add_argument(
+        "--geometry-adapter-only",
+        action="store_true",
+        help="Freeze the complete Stage-1 model and train only the zero-init geometry adapter",
+    )
     parser.add_argument("--encoder-lora", action="store_true")
     parser.add_argument("--encoder-lora-mode", default="gated", choices=["plain", "gated"])
     parser.add_argument(
@@ -221,6 +242,11 @@ def main():
     )
     parser.add_argument("--wat3r-relative-depth-threshold", default=0.05, type=float)
     parser.add_argument("--wat3r-min-align-pixels", default=100, type=int)
+    parser.add_argument("--wat3r-min-hole-pixels", default=256, type=int)
+    parser.add_argument("--wat3r-hole-boundary-radius", default=5, type=int)
+    parser.add_argument("--wat3r-hole-boundary-weight", default=2.0, type=float)
+    parser.add_argument("--wat3r-far-quantile", default=0.7, type=float)
+    parser.add_argument("--wat3r-far-weight", default=2.0, type=float)
     parser.add_argument("--consistency-hardness-weight", default=0.0, type=float)
     parser.add_argument("--consistency-hardness-clamp-min", default=0.90, type=float)
     parser.add_argument("--consistency-hardness-clamp-max", default=1.10, type=float)
@@ -270,6 +296,16 @@ def main():
         raise ValueError("--wat3r-confidence-quantile must be in [0, 1]")
     if args.wat3r_frame_stride <= 0:
         raise ValueError("--wat3r-frame-stride must be positive")
+    if args.wat3r_min_hole_pixels < 0:
+        raise ValueError("--wat3r-min-hole-pixels must be non-negative")
+    if args.wat3r_hole_boundary_radius < 0:
+        raise ValueError("--wat3r-hole-boundary-radius must be non-negative")
+    if args.wat3r_hole_boundary_weight < 1 or args.wat3r_far_weight < 1:
+        raise ValueError("Wat3R boundary/far focus weights must be at least 1")
+    if not 0.0 <= args.wat3r_far_quantile <= 1.0:
+        raise ValueError("--wat3r-far-quantile must be in [0, 1]")
+    if args.geometry_adapter_only and not args.geometry_adapter:
+        raise ValueError("--geometry-adapter-only requires --geometry-adapter")
     use_wat3r = bool(args.wat3r_manifest)
     if (args.wat3r_hole_weight > 0 or args.wat3r_mv_weight > 0) and not use_wat3r:
         raise ValueError("Wat3R losses require --wat3r-manifest")
@@ -330,6 +366,9 @@ def main():
         encoder_lora_alpha=args.encoder_lora_alpha,
         encoder_lora_dropout=args.encoder_lora_dropout,
         encoder_lora_last_n_blocks=args.encoder_lora_last_n_blocks,
+        use_geometry_adapter=args.geometry_adapter,
+        geometry_adapter_hidden=args.geometry_adapter_hidden,
+        geometry_adapter_scale=args.geometry_adapter_scale,
     ).to(device)
     model.load_base_weights(base_ckpt, strict=False)
     base_load_stats = model.base_load_stats
@@ -372,17 +411,35 @@ def main():
     if args.init_from:
         init_state = torch.load(args.init_from, map_location="cpu")
         init_state = init_state["model"] if isinstance(init_state, dict) and "model" in init_state else init_state
-        model.load_state_dict(init_state, strict=False)
+        init_load = model.load_state_dict(init_state, strict=False)
+        allowed_missing = {
+            name for name in model.state_dict() if name.startswith("geometry_adapter.")
+        }
+        unexpected_missing = set(init_load.missing_keys) - allowed_missing
+        if unexpected_missing or init_load.unexpected_keys:
+            raise RuntimeError(
+                "Stage-1 checkpoint does not match the requested structure: "
+                f"missing={sorted(unexpected_missing)[:10]} "
+                f"unexpected={list(init_load.unexpected_keys)[:10]}"
+            )
         logger.info(f"Loaded latent-prior checkpoint from {args.init_from}")
+        logger.info(
+            "Stage-1 checkpoint coverage: missing_new_geometry=%d unexpected=0"
+            % len(init_load.missing_keys)
+        )
+    if args.geometry_adapter_only:
+        model.freeze_all_except_geometry_adapter()
+        logger.info("Stage-1 frozen: training only the zero-initialized geometry adapter")
 
     param_summary = summarize_trainable_parameters(model)
     logger.info(
-        "Trainable params | latent_prior=%d | prior_head=%d | encoder_lora=%d | plain_adapter=%d | base_head=%d | backbone=%d"
+        "Trainable params | latent_prior=%d | prior_head=%d | encoder_lora=%d | plain_adapter=%d | geometry_adapter=%d | base_head=%d | backbone=%d"
         % (
             _count_params([param for _, param in param_summary["latent_prior"]]),
             _count_params([param for _, param in param_summary["prior_head"]]),
             _count_params([param for _, param in param_summary["encoder_lora"]]),
             _count_params([param for _, param in param_summary["plain_adapter"]]),
+            _count_params([param for _, param in param_summary["geometry_adapter"]]),
             _count_params([param for _, param in param_summary["base_head"]]),
             _count_params([param for _, param in param_summary["backbone"]]),
         )
@@ -416,13 +473,18 @@ def main():
     )
     logger.info(
         "Wat3R privileged geometry: enabled=%s hole_weight=%.4f mv_weight=%.4f "
-        "conf_quantile=%.3f frame_stride=%d"
+        "conf_quantile=%.3f frame_stride=%d min_hole_pixels=%d boundary=(r%d,w%.2f) far=(q%.2f,w%.2f)"
         % (
             str(use_wat3r),
             args.wat3r_hole_weight,
             args.wat3r_mv_weight,
             args.wat3r_confidence_quantile,
             args.wat3r_frame_stride,
+            args.wat3r_min_hole_pixels,
+            args.wat3r_hole_boundary_radius,
+            args.wat3r_hole_boundary_weight,
+            args.wat3r_far_quantile,
+            args.wat3r_far_weight,
         )
     )
     logger.info("Numerics: amp=%s grad_clip=%.4f" % (str(amp_enabled), args.grad_clip))
@@ -449,7 +511,11 @@ def main():
         )
 
     for epoch in range(args.epochs):
-        model.train()
+        if args.geometry_adapter_only:
+            model.eval()
+            model.geometry_adapter.train()
+        else:
+            model.train()
         running_loss = 0.0
         for step, sample in enumerate(train_loader):
             if epoch == 0 and step == 0:
@@ -536,6 +602,11 @@ def main():
                             gradient_scales=hole_geometry_scales,
                             gradient_weight=args.wat3r_hole_grad_weight,
                             min_align_pixels=args.wat3r_min_align_pixels,
+                            min_hole_pixels=args.wat3r_min_hole_pixels,
+                            boundary_radius=args.wat3r_hole_boundary_radius,
+                            boundary_weight=args.wat3r_hole_boundary_weight,
+                            far_quantile=args.wat3r_far_quantile,
+                            far_weight=args.wat3r_far_weight,
                         )
                     else:
                         wat3r_hole = {
@@ -543,14 +614,23 @@ def main():
                             "value": pred_disp.new_zeros(()),
                             "gradient": pred_disp.new_zeros(()),
                             "coverage": pred_disp.new_zeros(()),
+                            "hole_ratio": pred_disp.new_zeros(()),
+                            "eligible_fraction": pred_disp.new_zeros(()),
+                            "boundary_coverage": pred_disp.new_zeros(()),
+                            "far_coverage": pred_disp.new_zeros(()),
                         }
                     if args.wat3r_mv_weight > 0:
+                        temporal_source_focus = torch.zeros_like(
+                            teacher_reliable_views, dtype=torch.bool
+                        )
+                        temporal_source_focus[:, 1] = ~observed_mask
                         wat3r_mv = wat3r_multiview_geometry_loss(
                             pred_disp_views,
                             teacher_depth_views,
                             teacher_reliable_views,
                             teacher_intrinsics,
                             teacher_extrinsics,
+                            source_focus_mask=temporal_source_focus,
                             relative_depth_threshold=args.wat3r_relative_depth_threshold,
                             min_align_pixels=args.wat3r_min_align_pixels,
                         )
@@ -565,6 +645,10 @@ def main():
                         "value": pred_disp.new_zeros(()),
                         "gradient": pred_disp.new_zeros(()),
                         "coverage": pred_disp.new_zeros(()),
+                        "hole_ratio": pred_disp.new_zeros(()),
+                        "eligible_fraction": pred_disp.new_zeros(()),
+                        "boundary_coverage": pred_disp.new_zeros(()),
+                        "far_coverage": pred_disp.new_zeros(()),
                     }
                     wat3r_mv = {
                         "loss": pred_disp.new_zeros(()),
@@ -635,7 +719,7 @@ def main():
 
             if step % args.log_interval == 0:
                 logger.info(
-                    "Epoch %02d Iter %04d/%04d Step %06d Loss=%.6f L1=%.6f SiLog=%.6f Metric=%.6f Grad=%.6f Gauge=%.6f HoleGeom=%.6f WatHole=%.6f WatHoleCov=%.4f WatMV=%.6f WatMVCov=%.4f HoleRatio=%.4f HardMean=%.6f LR=%.2e"
+                    "Epoch %02d Iter %04d/%04d Step %06d Loss=%.6f L1=%.6f SiLog=%.6f Metric=%.6f Grad=%.6f Gauge=%.6f HoleGeom=%.6f WatHole=%.6f WatHoleCov=%.4f WatHoleRatio=%.4f WatEligible=%.3f WatBoundary=%.4f WatFar=%.4f WatMV=%.6f WatMVCov=%.4f HoleRatio=%.4f HardMean=%.6f LR=%.2e"
                     % (
                         epoch + 1,
                         step,
@@ -650,6 +734,10 @@ def main():
                         loss_hole_geometry.item(),
                         wat3r_hole["loss"].item(),
                         wat3r_hole["coverage"].item(),
+                        wat3r_hole["hole_ratio"].item(),
+                        wat3r_hole["eligible_fraction"].item(),
+                        wat3r_hole["boundary_coverage"].item(),
+                        wat3r_hole["far_coverage"].item(),
                         wat3r_mv["loss"].item(),
                         wat3r_mv["coverage"].item(),
                         (~observed_mask).float().mean().item(),
@@ -681,6 +769,13 @@ def main():
                 "Encoder LoRA norms: lora_b_sum=%.6f condition_gate_sum=%.6f"
                 % (lora_b_norm, condition_norm)
             )
+        if model.geometry_adapter is not None:
+            output_layer = model.geometry_adapter.body[-1]
+            adapter_norm = (
+                output_layer.weight.detach().float().norm()
+                + output_layer.bias.detach().float().norm()
+            )
+            logger.info("Geometry adapter output norm: %.6f" % adapter_norm.item())
         model.eval()
         metrics = evaluate_latent_prior(
             model,
