@@ -4,9 +4,12 @@ __pycache__/
 *.pth
 *.pt
 *.ckpt
+*.safetensors
 *.log
 exp_clean/
 runs/
 tmp/
+/eval/
+/checkpoints/
 .vscode/
 .idea/

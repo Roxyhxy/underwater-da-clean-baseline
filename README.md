@@ -1,5 +1,40 @@
 # Underwater DA Clean Baseline
 
+## Current UW-D research branch
+
+The new dense-supervision path is intentionally additive: the verified FLSea,
+latent-prior, and Wat3R experiments remain available as historical baselines.
+New work starts from reproducible UW-D scene splits rather than modifying those
+entrypoints in place.
+
+The audited UW-D release contains 24,922 one-to-one RGB/depth pairs over 165
+Hypersim scenes and eight Jerlov water types. AppleDouble files prefixed with
+`._` are metadata and are excluded by the manifest builder.
+
+Generate deterministic, scene-disjoint manifests on the server:
+
+```bash
+export UWD_ROOT=/data1/hxy/DATASET/uw-d
+bash scripts/build_uwd_splits.sh
+```
+
+This writes JSONL manifests and explicit scene lists under
+`dataset/splits/uwd/`. The split uses 80%/10%/remaining scenes for
+train/validation/test, so frames from one Hypersim scene never cross splits.
+
+The initial implementation provides:
+
+- `dataset/uwd.py`: paired HDF5 depth loading, water labels, synchronized
+  aspect-preserving resize/crop/flip, and ImageNet normalization;
+- `tools/build_uwd_manifests.py`: strict one-to-one pairing audit and split
+  generation;
+- `util/depth_losses.py`: scale/shift-invariant inverse-depth supervision and
+  multi-scale gradient preservation.
+
+The next implementation milestone is a dedicated UW-D trainer using the
+unmodified DA2 decoder. Aqua conditioning and AdaLN-Zero are added only after
+that dense baseline is reproduced.
+
 This project is a cleaned baseline extracted from `DA_16_lora_feature_distill_adapter`.
 
 It keeps only the core path that is still worth building on:
