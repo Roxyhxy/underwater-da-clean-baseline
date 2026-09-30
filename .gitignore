@@ -11,5 +11,6 @@ runs/
 tmp/
 /eval/
 /checkpoints/
+/dataset/splits/uwd/
 .vscode/
 .idea/

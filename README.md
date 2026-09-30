@@ -35,6 +35,23 @@ The next implementation milestone is a dedicated UW-D trainer using the
 unmodified DA2 decoder. Aqua conditioning and AdaLN-Zero are added only after
 that dense baseline is reproduced.
 
+Run that decoder-only dense baseline with the same server-oriented shell style
+as the existing FLSea experiments:
+
+```bash
+export UWD_ROOT=/data1/hxy/DATASET/uw-d
+export CKPT=/path/to/depth_anything_v2_vits.pth
+export CUDA_VISIBLE_DEVICES=0
+bash scripts/train_uwd_dense_baseline.sh
+```
+
+The baseline freezes the complete DINOv2 encoder, trains the original DA2 DPT
+decoder for 20 epochs with AdamW at `5e-6`, and uses scale/shift-invariant
+inverse-depth plus multi-scale gradient supervision. Validation aligns predicted
+disparity to inverse ground-truth depth per image before computing depth metrics.
+Checkpoints contain the trainable decoder only and are selected on the
+validation set as `best_abs_rel.pth` and `best_d1.pth`.
+
 This project is a cleaned baseline extracted from `DA_16_lora_feature_distill_adapter`.
 
 It keeps only the core path that is still worth building on:
